@@ -4,6 +4,10 @@ The language of QA Scenario Recorder. Use these words exactly in code, UI and do
 
 **Scenario** — One recorded manual test: everything a tester did from Start to Stop on one tab, plus what the application did in response. _Avoid_: session (that word is only the storage record), recording, test.
 
+**Project** — The application under test (name, base URL). Holds Suites. Saved as a runnable Playwright + Cypress test project.
+
+**Suite** — An ordered list of Scenarios run together (Smoke, Regression, a feature area). A Scenario can be in several Suites. A **Suite run** replays each Scenario in order with its saved Test data choice.
+
 **Step** — One meaningful thing the tester did: navigate, click, fill, select, check/uncheck, press a key, hover, drag, upload, assert, note, screenshot. A step is semantic ("fill Email with …"), never a raw browser event. _Avoid_: action, event.
 
 **Interaction** — A raw browser event (click, input, change, keydown, mouseover, dragstart, drop…) observed by the recorder before it becomes a Step. Interactions are many; Steps are few.

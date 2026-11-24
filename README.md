@@ -7,6 +7,13 @@ Postman and HAR**.
 
 Works on any website or web app — no SDK, no app changes. Manifest V3, plain JavaScript, no build step.
 
+## What's new in 1.2: projects and test suites
+
+- **Save a scenario:** after **Stop**, the popup asks for a name and a Project › Suite; one click files it. In the workbench, **Save to suite…** also sets tags and priority and can create a new project or suite. A scenario can belong to several suites, for example Smoke and Regression.
+- **Project page:** base URL, suites, ordered scenario lists (reorder, add, remove), and **Run suite**. A suite run replays every scenario in order, each with its saved test-data choice. Scenarios that need a one-time code are skipped and reported.
+- **Save project (.zip):** a runnable test project with `playwright.config.ts` (one Playwright project per suite), `tests/<suite>/NN-<scenario>.spec.ts`, Cypress specs, a merged `.env.example`, AI context per scenario, a README with run commands, and `project.qa.json` to re-import.
+- **Backups are safe to share:** passwords, one-time codes, auth headers and secrets in captured request bodies are scrubbed unless you choose to include real values.
+
 ## What's new in 1.1
 
 - **Smart test data.** Every typed or chosen value is recognised: email, phone, name, address, date, amount, password, one-time code and more. Recognition uses labels, input types, `autocomplete` hints and constraints such as max length, pattern and min/max. The recorder also works out what the scenario is (sign-up, create, login, checkout, booking, search) and builds a **data plan**, for example: *sign-up form, so the email must be unique and needs a fresh value*.
@@ -169,6 +176,7 @@ src/content/replayer.js             step execution with auto-wait, drag, hover
 src/content/overlay.js              in-page toolbar / highlighter (shadow DOM)
 src/shared/test-data.js             Test data: field kinds, data plan, fresh values, spec generators
 src/shared/run-report.js            Run report: verdict, counts, issues, API diff
+src/shared/projects.js              Projects and Suites: suite operations, project export, backups
 src/shared/exporters.js             scenario model + all export formats (pure, tested)
 src/shared/analysis.js              URL normalisation, API diff, header masking
 src/shared/zip.js                   dependency-free ZIP writer

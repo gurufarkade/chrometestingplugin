@@ -36,6 +36,15 @@
     </section>
     <div id="dataHint" class="data-hint hidden"></div>
 
+    <section id="saveCard" class="card hidden" aria-label="Save scenario">
+      <div class="save-head"><b>Save scenario</b><span id="savedIn" class="muted"></span></div>
+      <input id="saveName" type="text" aria-label="Scenario name" />
+      <div class="save-row">
+        <select id="saveSuite" aria-label="Project and suite"></select>
+        <button id="btnSaveScenario" class="primary">Save</button>
+      </div>
+    </section>
+
     <section id="tools" class="card hidden">
       <div class="tools">
         <button id="btnAssert" title="Click an element on the page to assert its text/value (Alt+Shift+A)">✓ Assert element</button>

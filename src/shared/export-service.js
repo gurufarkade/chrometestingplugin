@@ -74,7 +74,7 @@ export async function exportSession(sessionId, format, opts = {}) {
       content = envExample(scenario);
       break;
     case 'backup':
-      content = JSON.stringify(toBackup(session, events, opts.includeScreenshots ? screenshots : undefined), null, 2);
+      content = JSON.stringify(toBackup(session, events, opts.includeScreenshots ? screenshots : undefined, { includeSecrets: opts.secrets === 'include' }), null, 2);
       break;
     case 'pack':
       content = buildEvidencePack(scenario, screenshots.filter((s) => !s.runId), { session, events });

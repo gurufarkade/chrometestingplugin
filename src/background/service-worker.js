@@ -37,6 +37,8 @@ let state = null;
 let settingsCache = null;
 let lastSeq = 0;
 let replayCancelled = false;
+let suiteCancelled = false;
+let currentRun = Promise.resolve(); // resolves when the active replay finishes
 const cidToEventId = new Map();
 
 // ------------------------------------------------------------------ helpers
@@ -702,7 +704,7 @@ async function startReplay({ sessionId, tabId, data }) {
   await chrome.tabs.update(tabId, { active: true }).catch(() => {});
 
   // Run asynchronously; the popup/dashboard listen for progress broadcasts.
-  (async () => {
+  currentRun = (async () => {
     let failed = false;
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
@@ -797,6 +799,63 @@ async function persistRun(sessionId, run) {
   await db.putSession(session);
 }
 
+// ------------------------------------------------------------------ suites
+
+/**
+ * Replay every Scenario of a Suite, in order, in one tab. Each Scenario uses its saved
+ * Test data choice (or the recorded data). Scenarios that need data typed at run time
+ * (one-time codes) are skipped and reported, since a suite run is unattended.
+ */
+async function runSuite({ projectId, suiteId, tabId }) {
+  const project = await db.getProject(projectId);
+  const suite = project?.suites.find((s) => s.id === suiteId);
+  if (!suite) throw new Error('Suite not found');
+  if (!suite.scenarioIds.length) throw new Error('This suite has no scenarios yet');
+  suiteCancelled = false;
+  const suiteRun = { id: uid('suiterun'), startedAt: Date.now(), status: 'running', results: [] };
+  const save = async () => {
+    const p = await db.getProject(projectId);
+    p.suites = p.suites.map((s) => (s.id === suiteId ? { ...s, lastRun: structuredClone(suiteRun) } : s));
+    await db.putProject(p);
+    broadcast({ type: 'suite:progress', projectId, suiteId, suiteRun });
+  };
+  await save();
+
+  (async () => {
+    for (const sessionId of suite.scenarioIds) {
+      const session = await db.getSession(sessionId);
+      if (!session) continue;
+      const entry = { sessionId, name: session.name };
+      if (suiteCancelled) {
+        suiteRun.results.push({ ...entry, status: 'not-run' });
+        continue;
+      }
+      const steps = await db.getEvents(sessionId, { runId: null, kind: 'step' });
+      const plan = buildDataPlan(steps.filter((s) => !s.skip));
+      if (plan.fields.some((f) => f.strategy === 'custom')) {
+        suiteRun.results.push({ ...entry, status: 'skipped', headline: 'Needs a one-time code / custom value — run it on its own' });
+        await save();
+        continue;
+      }
+      try {
+        await startReplay({ sessionId, tabId, data: session.dataChoice ? { mode: 'recommended', ...session.dataChoice } : { mode: 'recorded' } });
+        await currentRun;
+        const run = (await db.getSession(sessionId)).runs.slice(-1)[0];
+        suiteRun.results.push({ ...entry, runId: run.id, status: run.status, headline: run.report?.headline });
+      } catch (e) {
+        suiteRun.results.push({ ...entry, status: 'failed', headline: e.message });
+      }
+      await save();
+    }
+    suiteRun.endedAt = Date.now();
+    const st = suiteRun.results.map((r) => r.status);
+    suiteRun.status = suiteCancelled ? 'cancelled' : st.includes('failed') ? 'failed' : st.includes('warning') || st.includes('skipped') ? 'warning' : 'passed';
+    await save();
+    broadcast({ type: 'suite:done', projectId, suiteId, suiteRun });
+  })();
+  return { ok: true, suiteRunId: suiteRun.id };
+}
+
 // ------------------------------------------------------------------ messaging
 
 async function activeTabId() {
@@ -834,6 +893,14 @@ const handlers = {
   async stopReplay() {
     replayCancelled = true;
     return publicState();
+  },
+  async runSuite(msg) {
+    return runSuite({ projectId: msg.projectId, suiteId: msg.suiteId, tabId: msg.tabId ?? (await activeTabId()) });
+  },
+  async stopSuite() {
+    suiteCancelled = true;
+    replayCancelled = true;
+    return { ok: true };
   },
   async openDashboard(msg) {
     const url = chrome.runtime.getURL(`src/dashboard/dashboard.html${msg.sessionId ? `#${msg.sessionId}` : ''}`);

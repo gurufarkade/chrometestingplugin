@@ -82,7 +82,64 @@ function render(s) {
   }
   renderLastRun();
   renderDataHint().catch(() => {});
+  renderSaveCard().catch(() => {});
 }
+
+// ------------------------------------------------------------------ save scenario to a suite
+
+let saveCardFor = null;
+async function renderSaveCard() {
+  const card = $('saveCard');
+  if (!state?.sessionId || state.status !== STATUS.STOPPED) return card.classList.add('hidden');
+  const db = await import('../shared/db.js');
+  const { suitesOf } = await import('../shared/projects.js');
+  const [session, projects] = await Promise.all([db.getSession(state.sessionId), db.listProjects()]);
+  if (!session) return card.classList.add('hidden');
+  const inSuites = suitesOf(projects, session.id);
+  $('savedIn').textContent = inSuites.length ? `in ${inSuites.map((x) => `${x.project.name} › ${x.suite.name}`).join(', ')}` : 'not in a suite yet';
+  if (saveCardFor !== session.id) {
+    saveCardFor = session.id;
+    $('saveName').value = session.name;
+    const sel = $('saveSuite');
+    sel.replaceChildren();
+    for (const p of projects) {
+      const group = document.createElement('optgroup');
+      group.label = p.name;
+      for (const s of p.suites) group.append(new Option(`${s.name} (${s.scenarioIds.length})`, `${p.id}|${s.id}`));
+      sel.append(group);
+    }
+    sel.append(new Option(projects.length ? '+ New project or suite…' : '+ Create a project and suite…', 'new'));
+    let last = null;
+    try {
+      last = localStorage.getItem('qa.lastSuite');
+    } catch {}
+    if (last && [...sel.options].some((o) => o.value === last)) sel.value = last;
+  }
+  card.classList.remove('hidden');
+}
+
+$('btnSaveScenario').addEventListener('click', async () => {
+  const sid = state?.sessionId;
+  const choice = $('saveSuite').value;
+  try {
+    const db = await import('../shared/db.js');
+    const session = await db.getSession(sid);
+    session.name = $('saveName').value.trim() || session.name;
+    await db.putSession(session);
+    if (choice === 'new') return act('openDashboard', { sessionId: `${sid}/save` });
+    const [projectId, suiteId] = choice.split('|');
+    const { addToSuite } = await import('../shared/projects.js');
+    const project = await db.getProject(projectId);
+    await db.putProject(addToSuite(project, suiteId, sid));
+    try {
+      localStorage.setItem('qa.lastSuite', choice);
+    } catch {}
+    flash(`Saved to ${project.name} › ${project.suites.find((s) => s.id === suiteId).name}`);
+    renderSaveCard();
+  } catch (e) {
+    flash(e.message, true);
+  }
+});
 
 async function renderLastRun() {
   const box = $('lastRun');

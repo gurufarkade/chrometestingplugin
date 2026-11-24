@@ -5,6 +5,9 @@ import { buildScenario, parseBackup, candidateLabel } from '../shared/exporters.
 import { buildDataPlan, resolveData, createRng } from '../shared/test-data.js';
 import { buildRunReport } from '../shared/run-report.js';
 import { exportSession, download, FORMATS } from '../shared/export-service.js';
+import { createProject, addSuite, addToSuite, removeFromSuite, moveInSuite, deleteSuite, suitesOf, buildProjectFiles, toProjectBackup, parseProjectBackup } from '../shared/projects.js';
+import { createZip } from '../shared/zip.js';
+import { slugify } from '../shared/exporters.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -38,6 +41,8 @@ const ICON = {
 };
 
 let sessions = [];
+let projects = [];
+let curProjectId = null;
 let cur = null;
 let view = 'steps';
 let selStep = null;
@@ -82,36 +87,50 @@ const copyBtn = (text, title = 'Copy') => h('button', { class: 'btn ghost icon s
 // ================================================================== scenarios rail
 
 async function loadSessions() {
-  sessions = await db.listSessions();
+  [sessions, projects] = await Promise.all([db.listSessions(), db.listProjects()]);
   renderRail();
   const est = await navigator.storage?.estimate?.();
   if (est) $('storageInfo').textContent = `${fmtBytes(est.usage)} stored`;
 }
 
+/** Rail: Project › Suite › Scenario tree, then scenarios not filed in any suite. */
 function renderRail() {
   const term = $('search').value.toLowerCase();
-  const ul = $('sessionList');
-  ul.replaceChildren();
-  for (const s of sessions) {
-    if (term && !`${s.name} ${s.startUrl}`.toLowerCase().includes(term)) continue;
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  const match = (s) => !term || `${s.name} ${s.startUrl} ${(s.tags || []).join(' ')}`.toLowerCase().includes(term);
+  const item = (s) => {
     const last = (s.runs || []).filter((r) => r.status !== 'running').slice(-1)[0];
-    ul.append(
-      h(
-        'li',
-        { class: cur?.session.id === s.id ? 'active' : '', role: 'option', tabindex: 0, onclick: () => (location.hash = s.id), onkeydown: (e) => e.key === 'Enter' && (location.hash = s.id) },
-        h('span', { class: 's-name', title: s.name, text: s.name }),
-        h(
-          'span',
-          { class: 's-meta' },
-          h('span', { text: new Date(s.createdAt).toLocaleDateString() }),
-          s.summary ? h('span', { class: 'mono', text: `${s.summary.steps} st · ${s.summary.network} api` }) : null,
-          s.status === 'recording' ? h('span', { class: 'chip recording', text: 'rec' }) : null,
-          last ? h('span', { class: `chip ${last.status}`, text: last.status }) : null,
-        ),
-      ),
+    return h(
+      'div',
+      { class: `tree-item${cur?.session.id === s.id ? ' active' : ''}`, role: 'treeitem', tabindex: 0, title: s.name, onclick: () => (location.hash = s.id), onkeydown: (e) => e.key === 'Enter' && (location.hash = s.id) },
+      s.name,
+      s.status === 'recording' ? h('span', { class: 'chip recording', text: 'rec' }) : last ? h('span', { class: `chip ${last.status}`, text: last.status }) : null,
     );
+  };
+  const tree = $('sessionList');
+  tree.replaceChildren();
+  const filed = new Set();
+  for (const p of projects) {
+    const group = h('div', { class: 'tree-group', role: 'group' }, h('div', { class: `tree-proj${curProjectId === p.id ? ' active' : ''}`, role: 'treeitem', tabindex: 0, onclick: () => (location.hash = `project/${p.id}`), onkeydown: (e) => e.key === 'Enter' && (location.hash = `project/${p.id}`) }, h('span', { class: 'glyph', text: p.name.slice(0, 1).toUpperCase() }), p.name));
+    for (const suite of p.suites) {
+      const items = suite.scenarioIds.map((id) => byId.get(id)).filter(Boolean);
+      items.forEach((s) => filed.add(s.id));
+      const shown = items.filter(match);
+      if (term && !shown.length) continue;
+      group.append(h('div', { class: 'tree-suite' }, `${suite.name} · ${items.length}`, suite.lastRun ? h('span', { class: `pip ${suite.lastRun.status}`, title: `last suite run: ${suite.lastRun.status}` }) : null), ...shown.map(item));
+    }
+    tree.append(group);
   }
-  if (!ul.children.length) ul.append(h('li', { class: 'dim', text: sessions.length ? 'No match' : 'Nothing recorded yet' }));
+  const unfiled = sessions.filter((s) => !filed.has(s.id) && match(s));
+  if (unfiled.length) tree.append(h('div', { class: 'tree-head', text: projects.length ? 'Not in a suite' : 'Scenarios' }), ...unfiled.map(item));
+  if (!tree.children.length) tree.append(h('div', { class: 'tree-head', text: sessions.length ? 'No match' : 'Nothing recorded yet' }));
+}
+
+async function saveProject(p) {
+  await db.putProject(p);
+  projects = await db.listProjects();
+  renderRail();
+  return p;
 }
 
 // ================================================================== session
@@ -137,8 +156,10 @@ async function openSession(id, { keepSelection = false } = {}) {
   const plan = buildDataPlan(rawSteps.filter((s) => !s.skip));
   cur = { session, events, screenshots, scenario, rawById, shotByStep, runShot, runs, lastRun, plan };
   if (!keepSelection || !scenario.steps.some((s) => s.id === selStep)) selStep = scenario.steps.find((s) => s.action !== 'goto')?.id ?? scenario.steps[0]?.id ?? null;
+  curProjectId = null;
   $('empty').classList.add('hidden');
   $('settingsView').classList.add('hidden');
+  $('projectView').classList.add('hidden');
   $('sessionView').classList.remove('hidden');
   renderHead();
   renderView();
@@ -156,6 +177,9 @@ function renderHead() {
       h('span', { text: fmtDate(session.createdAt) }),
       env.viewport ? h('span', { class: 'mono', text: `${env.viewport.width}×${env.viewport.height}` }) : null,
       env.timezone ? h('span', { text: `${env.language} · ${env.timezone}` }) : null,
+      session.priority ? h('span', { class: 'chip plain', text: session.priority }) : null,
+      ...(session.tags || []).map((t) => h('span', { class: 'tag', text: `#${t}` })),
+      ...suitesOf(projects, session.id).map(({ project, suite }) => h('a', { href: `#project/${project.id}`, class: 'tag frame', text: `${project.name} › ${suite.name}` })),
     ].filter(Boolean), // replaceChildren() would print null as text
   );
 
@@ -860,9 +884,11 @@ const SETTING_META = {
 
 async function openSettings() {
   cur = null;
+  curProjectId = null;
   renderRail();
   $('empty').classList.add('hidden');
   $('sessionView').classList.add('hidden');
+  $('projectView').classList.add('hidden');
   $('settingsView').classList.remove('hidden');
   const s = await getSettings();
   const groups = {};
@@ -890,29 +916,304 @@ $('settingsForm').addEventListener('submit', async (e) => {
   toast('Settings saved');
 });
 
+// ================================================================== save scenario to a suite
+
+const NEW = '__new__';
+let saveForm = null;
+
+function field(label, control, full = false) {
+  return h('label', { class: full ? 'full' : '' }, h('span', { text: label }), control);
+}
+
+/** Save the open scenario: name, tags, priority, and file it into a Project › Suite. */
+function openSaveDialog() {
+  const s = cur.session;
+  const lastProject = projects.find((p) => p.id === localStorageGet('lastProject')) || projects[0];
+  saveForm = {
+    name: h('input', { type: 'text', value: s.name, required: true }),
+    project: h('select', {}, ...projects.map((p) => h('option', { value: p.id, selected: p === lastProject, text: p.name })), h('option', { value: NEW, text: '+ New project…', selected: !projects.length })),
+    newProject: h('input', { type: 'text', placeholder: 'e.g. Customer portal' }),
+    baseUrl: h('input', { type: 'text', value: (s.startUrl || '').match(/^https?:\/\/[^/]+/)?.[0] || '' }),
+    suite: h('select'),
+    newSuite: h('input', { type: 'text', placeholder: 'e.g. Smoke, Regression, Checkout' }),
+    tags: h('input', { type: 'text', value: (s.tags || []).join(', '), placeholder: 'login, payments, P1-bug' }),
+    priority: h('select', {}, ['', 'P1', 'P2', 'P3'].map((p) => h('option', { value: p, selected: (s.priority || '') === p, text: p || 'No priority' }))),
+  };
+  const f = saveForm;
+  const newProjectRow = h('div', { class: 'full form-grid', style: { padding: 0 } }, field('Project name', f.newProject), field('Base URL', f.baseUrl));
+  const newSuiteRow = field('New suite name', f.newSuite, true);
+  const fillSuites = () => {
+    const p = projects.find((x) => x.id === f.project.value);
+    f.suite.replaceChildren(...(p ? p.suites.map((st) => h('option', { value: st.id, text: `${st.name} (${st.scenarioIds.length})` })) : []), h('option', { value: NEW, text: '+ New suite…' }));
+    if (!p || !p.suites.length) f.suite.value = NEW;
+    newProjectRow.classList.toggle('hidden', f.project.value !== NEW);
+    newSuiteRow.classList.toggle('hidden', f.suite.value !== NEW);
+  };
+  f.project.addEventListener('change', fillSuites);
+  f.suite.addEventListener('change', fillSuites);
+  fillSuites();
+
+  const memberships = suitesOf(projects, s.id);
+  $('saveDialogContent').replaceChildren(
+    field('Scenario name', f.name, true),
+    field('Project', f.project),
+    field('Suite', f.suite),
+    newProjectRow,
+    newSuiteRow,
+    field('Tags (comma separated)', f.tags),
+    field('Priority', f.priority),
+    memberships.length
+      ? h(
+          'div',
+          { class: 'full' },
+          h('span', { class: 'dim', text: 'Already in: ' }),
+          h(
+            'span',
+            { class: 'memberships' },
+            memberships.map(({ project, suite }) =>
+              h('span', { class: 'member' }, `${project.name} › ${suite.name}`, h('button', { type: 'button', title: 'Remove from this suite', 'aria-label': `Remove from ${suite.name}`, text: '✕', onclick: async (e) => (await saveProject(removeFromSuite(project, suite.id, s.id)), e.target.closest('.member').remove(), renderHead()) })),
+            ),
+          ),
+        )
+      : '',
+  );
+  $('saveDialogHint').textContent = 'A scenario can be in several suites.';
+  $('saveDialog').showModal();
+  f.name.focus();
+}
+
+$('saveDialog').addEventListener('close', async () => {
+  if ($('saveDialog').returnValue !== 'save' || !saveForm) return;
+  const f = saveForm;
+  try {
+    // project
+    let project = projects.find((p) => p.id === f.project.value);
+    if (f.project.value === NEW) project = createProject({ name: f.newProject.value || new URL(cur.session.startUrl).host, baseUrl: f.baseUrl.value });
+    // suite
+    let suiteId = f.suite.value;
+    if (suiteId === NEW || !project.suites.length) {
+      let suite;
+      ({ project, suite } = addSuite(project, f.newSuite.value || 'Smoke'));
+      suiteId = suite.id;
+    }
+    project = addToSuite(project, suiteId, cur.session.id);
+    await saveProject(project);
+    localStorageSet('lastProject', project.id);
+    // scenario metadata
+    const s = await db.getSession(cur.session.id);
+    s.name = f.name.value.trim() || s.name;
+    s.tags = f.tags.value.split(',').map((t) => t.trim()).filter(Boolean);
+    s.priority = f.priority.value || undefined;
+    await db.putSession(s);
+    await loadSessions();
+    await openSession(s.id, { keepSelection: true });
+    toast(`Saved to ${project.name} › ${project.suites.find((x) => x.id === suiteId).name}`);
+  } catch (e) {
+    alert(e.message);
+  }
+});
+
+function localStorageGet(k) {
+  try {
+    return localStorage.getItem(`qa.${k}`);
+  } catch {
+    return null;
+  }
+}
+function localStorageSet(k, v) {
+  try {
+    localStorage.setItem(`qa.${k}`, v);
+  } catch {}
+}
+
+// ================================================================== project page
+
+async function loadProjectScenarios(project) {
+  const ids = [...new Set(project.suites.flatMap((s) => s.scenarioIds))];
+  const items = [];
+  for (const id of ids) {
+    const session = await db.getSession(id);
+    if (session) items.push({ session, events: await db.getEvents(id), screenshots: [] });
+  }
+  return items;
+}
+
+async function openProject(id) {
+  const project = projects.find((p) => p.id === id) || (await db.getProject(id));
+  if (!project) return void (location.hash = '');
+  cur = null;
+  curProjectId = id;
+  $('empty').classList.add('hidden');
+  $('sessionView').classList.add('hidden');
+  $('settingsView').classList.add('hidden');
+  const host = $('projectView');
+  host.classList.remove('hidden');
+  renderRail();
+  const byId = new Map(sessions.map((s) => [s.id, s]));
+  const update = async (next) => {
+    await saveProject(next);
+    openProject(id);
+  };
+
+  const name = h('input', { class: 'title-input', type: 'text', value: project.name, 'aria-label': 'Project name', onchange: (e) => e.target.value.trim() && update({ ...project, name: e.target.value.trim() }) });
+  const baseUrl = h('input', { type: 'text', value: project.baseUrl || '', placeholder: 'https://staging.example.com', style: { maxWidth: '360px' }, onchange: (e) => update({ ...project, baseUrl: e.target.value.trim() }) });
+  const total = new Set(project.suites.flatMap((s) => s.scenarioIds)).size;
+
+  const suiteCard = (suite) => {
+    const rows = suite.scenarioIds.map((sid, i) => {
+      const s = byId.get(sid);
+      const res = suite.lastRun?.results.find((r) => r.sessionId === sid);
+      return h(
+        'li',
+        {},
+        h('span', { class: 'num', text: String(i + 1).padStart(2, '0') }),
+        h('div', { style: { minWidth: 0 } }, s ? h('a', { href: `#${sid}`, text: s.name }) : h('span', { class: 'dim', text: '(deleted scenario)' }), res?.headline ? h('div', { class: 'dim', style: { fontSize: '11.5px' }, text: res.headline }) : null),
+        res ? h('span', { class: `chip ${res.status}`, text: res.status }) : h('span'),
+        h(
+          'span',
+          { class: 'mini-actions' },
+          h('button', { class: 'btn ghost', title: 'Move up', 'aria-label': 'Move up', text: '↑', onclick: () => update(moveInSuite(project, suite.id, sid, -1)) }),
+          h('button', { class: 'btn ghost', title: 'Move down', 'aria-label': 'Move down', text: '↓', onclick: () => update(moveInSuite(project, suite.id, sid, 1)) }),
+          h('button', { class: 'btn ghost danger', title: 'Remove from suite', 'aria-label': 'Remove from suite', text: '✕', onclick: () => update(removeFromSuite(project, suite.id, sid)) }),
+        ),
+      );
+    });
+    const candidates = sessions.filter((s) => !suite.scenarioIds.includes(s.id));
+    const picker = h('select', { 'aria-label': `Add a scenario to ${suite.name}`, style: { flex: 1, width: 'auto' } }, h('option', { value: '', text: 'Add a recorded scenario…' }), ...candidates.map((s) => h('option', { value: s.id, text: s.name })));
+    const lr = suite.lastRun;
+    return h(
+      'section',
+      { class: 'panel' },
+      h(
+        'header',
+        { class: 'panel-head' },
+        h('h3', { text: suite.name }),
+        h('span', { class: 'dim mono', text: `${suite.scenarioIds.length} scenario${suite.scenarioIds.length === 1 ? '' : 's'}` }),
+        lr ? h('span', { class: `chip ${lr.status}`, title: fmtDate(lr.startedAt), text: lr.status }) : null,
+        h('span', { class: 'grow' }),
+        lr?.status === 'running'
+          ? h('button', { class: 'btn sm', text: 'Stop', onclick: () => chrome.runtime.sendMessage({ type: 'stopSuite' }) })
+          : h('button', { class: 'btn primary sm', disabled: !suite.scenarioIds.length, onclick: () => runSuite(project, suite) }, svg(ICON.play, true), 'Run suite'),
+        h('button', { class: 'btn ghost icon sm danger', title: 'Delete suite', 'aria-label': `Delete suite ${suite.name}`, onclick: () => confirm(`Delete suite "${suite.name}"? Scenarios stay recorded.`) && update(deleteSuite(project, suite.id)) }, svg('M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5')),
+      ),
+      h(
+        'div',
+        { class: 'panel-body' },
+        rows.length ? h('ol', { class: 'suite-list' }, rows) : h('div', { class: 'dim', text: 'No scenarios yet — add one below, or use "Save to suite…" on a scenario.' }),
+        candidates.length ? h('div', { class: 'add-row' }, picker, h('button', { class: 'btn sm', text: 'Add', onclick: () => picker.value && update(addToSuite(project, suite.id, picker.value)) })) : null,
+      ),
+    );
+  };
+
+  const newSuite = h('input', { type: 'text', placeholder: 'New suite name (e.g. Smoke)', style: { width: '240px' } });
+  host.replaceChildren(
+    h(
+      'header',
+      { class: 'head' },
+      h('div', { class: 'head-title' }, name, h('div', { class: 'meta' }, h('span', { class: 'eyebrow', text: 'Project' }), h('span', { text: `${project.suites.length} suites · ${total} scenarios` }), h('span', { text: `created ${fmtDate(project.createdAt)}` }))),
+      h(
+        'div',
+        { class: 'proj-actions' },
+        h('button', { class: 'btn primary', onclick: () => exportProjectZip(project) }, svg('M8 2v8m0 0L5 7m3 3 3-3M3 12v2h10v-2'), 'Save project (.zip)'),
+        h('button', { class: 'btn', text: 'Export backup (.json)', onclick: () => exportProjectBackup(project) }),
+        h('button', { class: 'btn ghost icon danger', title: 'Delete project', 'aria-label': 'Delete project', onclick: () => deleteProjectFlow(project) }, svg('M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5')),
+      ),
+    ),
+    h(
+      'div',
+      { class: 'view' },
+      h('div', { class: 'toolbar' }, h('span', { class: 'dim', text: 'Base URL' }), baseUrl, h('span', { class: 'grow' }), newSuite, h('button', { class: 'btn', text: 'Add suite', onclick: () => {
+        try {
+          update(addSuite(project, newSuite.value).project);
+        } catch (e) {
+          alert(e.message);
+        }
+      } })),
+      project.suites.length ? h('div', { class: 'suites' }, project.suites.map(suiteCard)) : h('div', { class: 'panel panel-body dim', text: 'Add a suite (Smoke, Regression, a feature area…) and file recorded scenarios into it.' }),
+    ),
+  );
+}
+
+async function runSuite(project, suite) {
+  const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
+  const res = await chrome.runtime.sendMessage({ type: 'runSuite', projectId: project.id, suiteId: suite.id, tabId: tab.id });
+  if (res?.error) {
+    alert(res.error);
+    chrome.tabs.remove(tab.id);
+  } else toast(`Running suite "${suite.name}" — ${suite.scenarioIds.length} scenarios`);
+}
+
+async function exportProjectZip(project) {
+  const secrets = confirm('Include real passwords and tokens in the project?\n\nOK = include (private use only)\nCancel = env placeholders (recommended for sharing)') ? 'include' : 'placeholder';
+  const files = buildProjectFiles(project, await loadProjectScenarios(project), { secrets });
+  download({ filename: `${slugify(project.name)}-tests.zip`, mime: 'application/zip', content: createZip(files) });
+  toast(`Project saved: ${files.length} files`);
+}
+
+async function exportProjectBackup(project) {
+  const backup = toProjectBackup(project, await loadProjectScenarios(project));
+  download({ filename: `${slugify(project.name)}.project.json`, mime: 'application/json', content: JSON.stringify(backup, null, 2) });
+}
+
+async function deleteProjectFlow(project) {
+  if (!confirm(`Delete project "${project.name}" and its suites? Recorded scenarios are kept.`)) return;
+  await db.deleteProject(project.id);
+  await loadSessions();
+  location.hash = '';
+}
+
+$('btnNewProject').addEventListener('click', async () => {
+  const name = prompt('Project name (the application under test):');
+  if (!name?.trim()) return;
+  const baseUrl = prompt('Base URL (optional), e.g. https://staging.example.com:', '') || '';
+  let p = createProject({ name, baseUrl });
+  p = addSuite(p, 'Smoke').project;
+  await saveProject(p);
+  location.hash = `project/${p.id}`;
+});
+$('btnSaveToSuite').addEventListener('click', openSaveDialog);
+
 // ================================================================== import + wiring
+
+/** Store one scenario backup; returns its (possibly new) id. */
+async function importScenario(data, { suffix }) {
+  const session = { ...data.session, runs: [] };
+  if (await db.getSession(session.id)) session.id = `${session.id}_imp${Date.now().toString(36)}`;
+  if (suffix) session.name = `${session.name} (imported)`;
+  await db.putSession(session);
+  const idMap = new Map();
+  for (const ev of data.events.sort((a, b) => a.seq - b.seq)) {
+    const { id: oldId, ...rest } = ev;
+    idMap.set(oldId, await db.addEvent({ ...rest, sessionId: session.id, runId: null }));
+  }
+  for (const s of data.screenshots || []) {
+    if (!s.runId) await db.putScreenshot({ ...s, id: `${s.id}_${session.id}`, sessionId: session.id, stepEventId: idMap.get(s.stepEventId) ?? null });
+  }
+  return session.id;
+}
 
 $('importFile').addEventListener('change', async (e) => {
   const file = e.target.files[0];
   e.target.value = '';
   if (!file) return;
   try {
-    const data = parseBackup(await file.text());
-    const session = { ...data.session };
-    if (await db.getSession(session.id)) session.id = `${session.id}_imp${Date.now().toString(36)}`;
-    session.name = `${session.name} (imported)`;
-    session.runs = [];
-    await db.putSession(session);
-    const idMap = new Map();
-    for (const ev of data.events.sort((a, b) => a.seq - b.seq)) {
-      const { id: oldId, ...rest } = ev;
-      idMap.set(oldId, await db.addEvent({ ...rest, sessionId: session.id, runId: null }));
+    const json = JSON.parse(await file.text());
+    if (json.format === 'qa-scenario-recorder/project') {
+      // Whole project: scenarios get new ids if they already exist here; suites are remapped.
+      const data = parseProjectBackup(json);
+      const remap = new Map();
+      for (const sc of data.scenarios) remap.set(sc.session.id, await importScenario(sc, { suffix: false }));
+      const p = { ...data.project, suites: data.project.suites.map((s) => ({ ...s, lastRun: undefined, scenarioIds: s.scenarioIds.map((id) => remap.get(id)).filter(Boolean) })) };
+      if (await db.getProject(p.id)) p.id = `${p.id}_imp${Date.now().toString(36)}`;
+      await db.putProject(p);
+      await loadSessions();
+      location.hash = `project/${p.id}`;
+      toast(`Project imported: ${data.scenarios.length} scenarios`);
+      return;
     }
-    for (const s of data.screenshots || []) {
-      if (!s.runId) await db.putScreenshot({ ...s, id: `${s.id}_${session.id}`, sessionId: session.id, stepEventId: idMap.get(s.stepEventId) ?? null });
-    }
+    const id = await importScenario(parseBackup(json), { suffix: true });
     await loadSessions();
-    location.hash = session.id;
+    location.hash = id;
     toast('Scenario imported');
   } catch (err) {
     alert(`Import failed: ${err.message}`);
@@ -932,6 +1233,7 @@ $('sessionTitle').addEventListener('change', async (e) => {
 $('btnRefresh').addEventListener('click', () => openSession(cur.session.id, { keepSelection: true }));
 $('btnDelete').addEventListener('click', async () => {
   if (!confirm(`Delete "${cur.session.name}" with all its steps, API calls and screenshots? This cannot be undone.`)) return;
+  for (const { project, suite } of suitesOf(projects, cur.session.id)) await db.putProject(removeFromSuite((await db.getProject(project.id)) || project, suite.id, cur.session.id));
   await db.deleteSession(cur.session.id);
   cur = null;
   location.hash = '';
@@ -941,6 +1243,15 @@ $('btnReplay').addEventListener('click', () => openReplayDialog());
 
 let refreshTimer = null;
 chrome.runtime.onMessage.addListener((msg) => {
+  if (msg.type === 'suite:progress' || msg.type === 'suite:done') {
+    db.listProjects().then((p) => {
+      projects = p;
+      if (curProjectId === msg.projectId && !document.querySelector('dialog[open]')) openProject(curProjectId);
+      else renderRail();
+    });
+    if (msg.type === 'suite:done') toast(`Suite finished: ${msg.suiteRun.status}`);
+    return;
+  }
   if (!cur) return;
   const id = cur.session.id;
   const relevant = (msg.type === 'state' && (msg.state.sessionId === id || msg.state.replay?.sessionId === id)) || ((msg.type === 'replay:progress' || msg.type === 'replay:done') && msg.sessionId === id);
@@ -952,14 +1263,18 @@ chrome.runtime.onMessage.addListener((msg) => {
 async function route() {
   const [id, action] = decodeURIComponent(location.hash.slice(1)).split('/');
   if (id === 'settings') return openSettings();
+  if (id === 'project') return openProject(action);
   if (id) {
     await openSession(id);
     if (action === 'replay') openReplayDialog();
+    if (action === 'save') openSaveDialog();
     return;
   }
   cur = null;
+  curProjectId = null;
   $('sessionView').classList.add('hidden');
   $('settingsView').classList.add('hidden');
+  $('projectView').classList.add('hidden');
   $('empty').classList.remove('hidden');
   renderRail();
 }

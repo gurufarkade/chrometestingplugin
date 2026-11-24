@@ -7,7 +7,7 @@
 //   screenshots { id, sessionId, runId|null, ts, dataUrl, stepId? }
 
 const DB_NAME = 'qa-scenario-recorder';
-const DB_VERSION = 1;
+const DB_VERSION = 2; // v2: projects store
 
 let dbPromise = null;
 
@@ -29,6 +29,7 @@ export function openDb() {
         const sc = db.createObjectStore('screenshots', { keyPath: 'id' });
         sc.createIndex('sessionId', 'sessionId');
       }
+      if (!db.objectStoreNames.contains('projects')) db.createObjectStore('projects', { keyPath: 'id' });
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -112,6 +113,21 @@ export async function getEvents(sessionId, { runId, kind } = {}) {
   if (runId !== undefined) all = all.filter((e) => (e.runId ?? null) === runId);
   if (kind) all = all.filter((e) => e.kind === kind);
   return all.sort((a, b) => a.seq - b.seq || a.ts - b.ts);
+}
+
+// ---------- projects ----------
+export async function putProject(project) {
+  return reqToPromise((await store('projects', 'readwrite')).put(project));
+}
+export async function getProject(id) {
+  return reqToPromise((await store('projects')).get(id));
+}
+export async function listProjects() {
+  const all = await reqToPromise((await store('projects')).getAll());
+  return all.sort((a, b) => a.name.localeCompare(b.name));
+}
+export async function deleteProject(id) {
+  return reqToPromise((await store('projects', 'readwrite')).delete(id));
 }
 
 // ---------- screenshots ----------

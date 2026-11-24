@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "QA Scenario Recorder",
   "short_name": "QA Recorder",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "description": "Record manual UI + API test scenarios with screenshots, replay them, and export AI-ready context, Playwright and Cypress tests.",
   "minimum_chrome_version": "111",
   "permissions": [

@@ -1159,13 +1159,31 @@ function packReadme(scn, slug) {
 
 // ------------------------------------------------------------------ backup / import
 
-export function toBackup(session, events, screenshots) {
+/**
+ * Remove secrets from raw events before they leave the machine in a backup:
+ * sensitive fill values, those values inside captured request bodies, and auth headers.
+ * Scrubbed fills are marked `masked`, so a replay of an imported backup asks for them.
+ */
+export function scrubSecrets(events, sensitiveHeaders = DEFAULT_SENSITIVE_HEADERS) {
+  const secrets = events.filter((e) => e.kind === 'step' && e.sensitive && e.value && String(e.value).length >= 3).map((e) => String(e.value));
+  const scrub = (text) => (text == null ? text : secrets.reduce((t, s) => t.split(s).join('<SECRET>'), String(text)));
+  return events.map((e) => {
+    if (e.kind === 'step' && e.sensitive) return { ...e, value: '', masked: true };
+    if (e.kind === 'network') {
+      return { ...e, requestBody: scrub(e.requestBody), responseBody: scrub(e.responseBody), requestHeaders: maskHeaders(e.requestHeaders, sensitiveHeaders), responseHeaders: maskHeaders(e.responseHeaders, sensitiveHeaders) };
+    }
+    return e;
+  });
+}
+
+export function toBackup(session, events, screenshots, { includeSecrets = false } = {}) {
+  const own = events.filter((e) => (e.runId ?? null) === null);
   return {
     format: 'qa-scenario-recorder/session',
     version: 1,
     exportedAt: new Date().toISOString(),
     session,
-    events: events.filter((e) => (e.runId ?? null) === null),
+    events: includeSecrets ? own : scrubSecrets(own),
     screenshots: screenshots || undefined,
   };
 }
