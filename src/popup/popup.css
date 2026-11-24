@@ -1,0 +1,27 @@
+body { width: 380px; padding: 12px; display: flex; flex-direction: column; gap: 10px; }
+.top { display: flex; align-items: center; justify-content: space-between; }
+.brand { display: flex; align-items: center; gap: 8px; font-weight: 700; font-size: 14px; }
+.stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; }
+.stats div { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 6px 4px; text-align: center; display: flex; flex-direction: column; }
+.stats b { font-size: 15px; font-variant-numeric: tabular-nums; }
+.stats span { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: .03em; }
+.controls { display: grid; grid-template-columns: 1.3fr 1fr 1fr 1fr 1fr; gap: 6px; }
+.controls button { padding: 8px 4px; font-weight: 600; }
+.controls .rec { display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--rec); border-color: var(--rec); color: #fff; }
+.controls .rec .dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; display: flex; flex-direction: column; gap: 8px; }
+.tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.tools button { font-size: 12px; padding: 6px 4px; }
+.tools button.on { background: var(--ok-bg); border-color: var(--ok); color: var(--ok); }
+.note { display: flex; gap: 6px; align-items: center; }
+.note .bug { display: flex; align-items: center; gap: 3px; font-size: 12px; color: var(--muted); white-space: nowrap; }
+.replay-head { display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
+.bar { height: 6px; background: var(--surface-2); border-radius: 3px; overflow: hidden; }
+.bar div { height: 100%; width: 0; background: var(--accent); transition: width .2s; }
+#lastRun { font-size: 12px; }
+#lastRun .head { display: flex; justify-content: space-between; align-items: center; }
+#lastRun ul { margin: 0; padding-left: 16px; color: var(--muted); }
+.msg { font-size: 12px; padding: 6px 8px; border-radius: 6px; background: var(--info-bg); }
+.msg.error { background: var(--bad-bg); color: var(--bad); }
+.actions { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.actions button { font-size: 12px; }

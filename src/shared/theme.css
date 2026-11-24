@@ -1,0 +1,71 @@
+:root {
+  --bg: #f7f8fa;
+  --surface: #ffffff;
+  --surface-2: #f1f3f5;
+  --border: #dfe3e8;
+  --text: #1d2125;
+  --muted: #5f6b7a;
+  --accent: #2563eb;
+  --accent-ink: #ffffff;
+  --rec: #d93025;
+  --warn: #b26a00;
+  --warn-bg: #fff4e0;
+  --ok: #188038;
+  --ok-bg: #e6f4ea;
+  --bad: #c5221f;
+  --bad-bg: #fce8e6;
+  --info-bg: #e8f0fe;
+  --code-bg: #f3f4f6;
+  --shadow: 0 1px 2px rgba(16, 24, 40, 0.06), 0 1px 3px rgba(16, 24, 40, 0.08);
+  --radius: 8px;
+  --font: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --mono: ui-monospace, 'Cascadia Code', 'SF Mono', Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #131518;
+    --surface: #1b1e22;
+    --surface-2: #23272c;
+    --border: #33383f;
+    --text: #e6e8eb;
+    --muted: #9aa4b1;
+    --accent: #6ea0ff;
+    --accent-ink: #0b1220;
+    --rec: #ff6b5f;
+    --warn: #f3b350;
+    --warn-bg: #3a2c12;
+    --ok: #5ccf86;
+    --ok-bg: #13301f;
+    --bad: #ff7b72;
+    --bad-bg: #3b1715;
+    --info-bg: #1a2742;
+    --code-bg: #15181c;
+    --shadow: none;
+    color-scheme: dark;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text); font: 13px/1.45 var(--font); }
+button {
+  font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 10px; cursor: pointer;
+}
+button:hover:not(:disabled) { border-color: var(--accent); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+button.danger { color: var(--bad); }
+button.small { padding: 3px 8px; font-size: 12px; }
+input[type='text'], input[type='number'], select, textarea {
+  font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--border);
+  border-radius: 6px; padding: 6px 8px; width: 100%;
+}
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+code, pre { font-family: var(--mono); font-size: 12px; }
+.hidden { display: none !important; }
+.chip { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: var(--surface-2); color: var(--muted); }
+.chip.recording { background: var(--bad-bg); color: var(--rec); }
+.chip.paused { background: var(--warn-bg); color: var(--warn); }
+.chip.replaying { background: var(--info-bg); color: var(--accent); }
+.chip.passed, .chip.completed { background: var(--ok-bg); color: var(--ok); }
+.chip.failed { background: var(--bad-bg); color: var(--bad); }

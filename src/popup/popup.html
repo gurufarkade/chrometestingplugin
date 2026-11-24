@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>QA Scenario Recorder</title>
+    <link rel="stylesheet" href="../shared/theme.css" />
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="top">
+      <div class="brand">
+        <img src="../../icons/icon32.png" alt="" width="20" height="20" />
+        <span>QA Scenario Recorder</span>
+      </div>
+      <span id="status" class="chip">Idle</span>
+    </header>
+
+    <section id="nameRow" class="row">
+      <input id="sessionName" type="text" placeholder="Scenario name (optional) — e.g. Login → create order" />
+    </section>
+
+    <section class="stats">
+      <div><b id="sTime">00:00</b><span>time</span></div>
+      <div><b id="sSteps">0</b><span>steps</span></div>
+      <div><b id="sApi">0</b><span>API calls</span></div>
+      <div><b id="sShots">0</b><span>screens</span></div>
+      <div><b id="sErr">0</b><span>errors</span></div>
+    </section>
+
+    <section class="controls">
+      <button id="btnStart" class="primary rec" title="Start recording this tab (Alt+Shift+R)"><span class="dot"></span>Start</button>
+      <button id="btnPause" title="Pause / resume (Alt+Shift+P)">Pause</button>
+      <button id="btnStop" title="Stop recording">Stop</button>
+      <button id="btnRerun" title="Replay the scenario in this tab">Rerun</button>
+      <button id="btnReset" class="danger" title="Discard the current capture">Reset</button>
+    </section>
+
+    <section id="tools" class="card hidden">
+      <div class="tools">
+        <button id="btnAssert" title="Click an element on the page to assert its text/value (Alt+Shift+A)">✓ Assert element</button>
+        <button id="btnAssertUrl" title="Assert the current URL">✓ Assert URL</button>
+        <button id="btnShot" title="Capture an evidence screenshot (Alt+Shift+S)">📷 Evidence</button>
+      </div>
+      <div class="note">
+        <input id="noteText" type="text" placeholder="Add a tester note…" />
+        <label class="bug"><input id="noteBug" type="checkbox" /> Bug</label>
+        <button id="btnNote">Add</button>
+      </div>
+    </section>
+
+    <section id="replayBox" class="card hidden">
+      <div class="replay-head">
+        <span id="replayLabel">Replaying…</span>
+        <button id="btnStopReplay" class="danger small">Stop replay</button>
+      </div>
+      <div class="bar"><div id="replayBar"></div></div>
+    </section>
+
+    <section id="lastRun" class="card hidden"></section>
+
+    <div id="msg" class="msg hidden"></div>
+
+    <footer class="actions">
+      <button id="btnDashboard">Open dashboard</button>
+      <button id="btnCopyAi" title="Copy AI-ready context (Markdown) for the last scenario">Copy AI context</button>
+      <button id="btnPack" title="Download evidence pack (.zip): AI context, Playwright, Cypress, Postman, HAR, screenshots">Evidence pack</button>
+    </footer>
+
+    <script type="module" src="popup.js"></script>
+  </body>
+</html>

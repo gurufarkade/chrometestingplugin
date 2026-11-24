@@ -1,0 +1,70 @@
+{
+  "manifest_version": 3,
+  "name": "QA Scenario Recorder",
+  "short_name": "QA Recorder",
+  "version": "1.0.0",
+  "description": "Record manual UI + API test scenarios with screenshots, replay them, and export AI-ready context, Playwright and Cypress tests.",
+  "minimum_chrome_version": "111",
+  "permissions": [
+    "storage",
+    "unlimitedStorage",
+    "tabs",
+    "scripting",
+    "webNavigation",
+    "webRequest"
+  ],
+  "host_permissions": ["<all_urls>"],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/page-hook.js"],
+      "run_at": "document_start",
+      "world": "MAIN",
+      "all_frames": false
+    },
+    {
+      "matches": ["<all_urls>"],
+      "js": ["src/content/selectors.js", "src/content/overlay.js", "src/content/replayer.js", "src/content/recorder.js"],
+      "run_at": "document_start",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_popup": "src/popup/popup.html",
+    "default_title": "QA Scenario Recorder",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+  "commands": {
+    "toggle-recording": {
+      "suggested_key": { "default": "Alt+Shift+R" },
+      "description": "Start / stop recording on the current tab"
+    },
+    "toggle-pause": {
+      "suggested_key": { "default": "Alt+Shift+P" },
+      "description": "Pause / resume recording"
+    },
+    "assert-mode": {
+      "suggested_key": { "default": "Alt+Shift+A" },
+      "description": "Add an assertion: click the element to verify"
+    },
+    "manual-screenshot": {
+      "suggested_key": { "default": "Alt+Shift+S" },
+      "description": "Capture an evidence screenshot"
+    }
+  }
+}
