@@ -3,122 +3,128 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>QA Scenario Recorder — Dashboard</title>
+    <title>QA Scenario Recorder — Workbench</title>
     <link rel="icon" href="../../icons/icon32.png" />
-    <link rel="stylesheet" href="../shared/theme.css" />
     <link rel="stylesheet" href="dashboard.css" />
   </head>
   <body>
-    <aside class="sidebar">
-      <div class="side-head">
-        <img src="../../icons/icon32.png" alt="" width="22" height="22" />
-        <strong>QA Scenario Recorder</strong>
-      </div>
-      <div class="side-tools">
-        <input id="search" type="text" placeholder="Search scenarios…" />
-        <label class="btn-like" title="Import a session backup (.session.json)">
-          Import<input id="importFile" type="file" accept=".json,application/json" hidden />
-        </label>
-      </div>
-      <ul id="sessionList" class="session-list"></ul>
-      <div class="side-foot">
-        <button id="btnSettings">⚙ Settings</button>
-        <span id="storageInfo" class="muted"></span>
-      </div>
-    </aside>
-
-    <main id="main">
-      <section id="empty" class="empty">
-        <h1>No scenario selected</h1>
-        <p>Open any web app, click the extension icon and press <b>Start</b>. Every click, input, API call and screen is captured.
-          Stop when done — the scenario appears here to review, replay and export for Playwright, Cypress or your AI assistant.</p>
-        <ul class="tips">
-          <li><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>R</kbd> start / stop · <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>P</kbd> pause</li>
-          <li><kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>A</kbd> assert an element · <kbd>Alt</kbd>+<kbd>Shift</kbd>+<kbd>S</kbd> evidence screenshot</li>
-        </ul>
-      </section>
-
-      <section id="sessionView" class="hidden">
-        <header class="session-head">
-          <div class="title-row">
-            <input id="sessionTitle" class="title-input" type="text" aria-label="Scenario name" />
-            <span id="sessionStatus" class="chip"></span>
-          </div>
-          <div id="sessionMeta" class="meta"></div>
-          <div class="head-actions">
-            <button id="btnReplay" class="primary" title="Open the start URL in a new tab and replay every step">▶ Replay in new tab</button>
-            <button id="btnRefresh" title="Reload data">↻ Refresh</button>
-            <button id="btnDelete" class="danger">Delete</button>
-          </div>
-        </header>
-
-        <nav class="tabs" role="tablist">
-          <button role="tab" data-tab="steps" class="active">Steps <span id="cSteps" class="count"></span></button>
-          <button role="tab" data-tab="network">Network <span id="cNet" class="count"></span></button>
-          <button role="tab" data-tab="console">Console <span id="cCon" class="count"></span></button>
-          <button role="tab" data-tab="gallery">Screenshots <span id="cShots" class="count"></span></button>
-          <button role="tab" data-tab="runs">Replays <span id="cRuns" class="count"></span></button>
-          <button role="tab" data-tab="export">Export</button>
-        </nav>
-
-        <div id="tab-steps" class="tab-panel"></div>
-
-        <div id="tab-network" class="tab-panel hidden">
-          <div class="filters">
-            <input id="netSearch" type="text" placeholder="Filter by URL or body…" />
-            <select id="netMethod"><option value="">All methods</option><option>GET</option><option>POST</option><option>PUT</option><option>PATCH</option><option>DELETE</option></select>
-            <select id="netStatus">
-              <option value="">All statuses</option><option value="2">2xx</option><option value="3">3xx</option><option value="4">4xx</option><option value="5">5xx</option><option value="err">Errors (4xx/5xx/failed)</option>
-            </select>
-            <label class="check"><input id="netApiOnly" type="checkbox" checked /> API only</label>
-          </div>
-          <div class="split">
-            <div class="table-wrap"><table id="netTable" class="grid"></table></div>
-            <div id="netDetail" class="detail hidden"></div>
+    <div class="app">
+      <!-- ============ scenario rail ============ -->
+      <aside class="rail" aria-label="Scenarios">
+        <div class="brand">
+          <span class="brand-mark" aria-hidden="true"><i></i></span>
+          <div>
+            <strong>QA Scenario Recorder</strong>
+            <small>Workbench</small>
           </div>
         </div>
-
-        <div id="tab-console" class="tab-panel hidden"></div>
-        <div id="tab-gallery" class="tab-panel hidden"></div>
-        <div id="tab-runs" class="tab-panel hidden"></div>
-
-        <div id="tab-export" class="tab-panel hidden">
-          <div class="export-grid">
-            <div class="card">
-              <h3>Secrets &amp; credentials</h3>
-              <label class="radio"><input type="radio" name="secrets" value="placeholder" checked /> Env placeholders <span class="muted">(<code>&lt;TEST_PASSWORD&gt;</code>, recommended)</span></label>
-              <label class="radio"><input type="radio" name="secrets" value="include" /> Include real values <span class="muted">(for a private AI / local use)</span></label>
-              <label class="radio"><input type="radio" name="secrets" value="mask" /> Mask (<code>********</code>)</label>
-              <p id="secretWarn" class="warn hidden">Real passwords, tokens and auth headers will be written into the export. Don't share or commit it.</p>
-              <h3>Format</h3>
-              <div id="formatList" class="format-list"></div>
-            </div>
-            <div class="card preview">
-              <div class="preview-head">
-                <strong id="previewTitle">Preview</strong>
-                <span>
-                  <button id="btnCopy">Copy</button>
-                  <button id="btnDownload" class="primary">Download</button>
-                </span>
-              </div>
-              <pre id="preview" class="code"></pre>
-            </div>
-          </div>
+        <div class="rail-tools">
+          <input id="search" type="search" placeholder="Filter scenarios" aria-label="Filter scenarios" />
+          <label class="btn ghost icon" title="Import a scenario backup (.session.json)">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 2v8m0 0L5 7m3 3 3-3M3 12v2h10v-2" /></svg>
+            <input id="importFile" type="file" accept=".json,application/json" hidden />
+          </label>
         </div>
-      </section>
+        <ul id="sessionList" class="session-list" role="listbox" aria-label="Recorded scenarios"></ul>
+        <div class="rail-foot">
+          <button id="btnSettings" class="btn ghost">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="2.2" /><path d="M8 1.5v2M8 12.5v2M1.5 8h2M12.5 8h2M3.4 3.4l1.4 1.4M11.2 11.2l1.4 1.4M3.4 12.6l1.4-1.4M11.2 4.8l1.4-1.4" /></svg>
+            Settings
+          </button>
+          <span id="storageInfo" class="mono dim"></span>
+        </div>
+      </aside>
 
-      <section id="settingsView" class="hidden">
-        <header class="session-head"><div class="title-row"><h2>Settings</h2></div></header>
-        <form id="settingsForm" class="settings"></form>
-      </section>
-    </main>
+      <!-- ============ main ============ -->
+      <main id="main">
+        <section id="empty" class="empty">
+          <div class="empty-card">
+            <span class="eyebrow">No scenario selected</span>
+            <h1>Record once. Replay, prove, automate.</h1>
+            <p>Open the application under test, click the extension icon and press <b>Start</b>. Clicks, typing, API calls, toasts and screens are captured as you test manually.</p>
+            <dl class="keys">
+              <div><dt><kbd>Alt</kbd><kbd>Shift</kbd><kbd>R</kbd></dt><dd>Start / stop</dd></div>
+              <div><dt><kbd>Alt</kbd><kbd>Shift</kbd><kbd>P</kbd></dt><dd>Pause</dd></div>
+              <div><dt><kbd>Alt</kbd><kbd>Shift</kbd><kbd>A</kbd></dt><dd>Assert an element</dd></div>
+              <div><dt><kbd>Alt</kbd><kbd>Shift</kbd><kbd>S</kbd></dt><dd>Evidence screenshot</dd></div>
+            </dl>
+          </div>
+        </section>
 
-    <div id="lightbox" class="lightbox hidden" role="dialog" aria-modal="true">
-      <div class="lb-inner">
-        <div class="lb-head"><span id="lbCaption"></span><button id="lbClose">✕</button></div>
-        <div class="lb-img"><img id="lbImg" alt="Screenshot" /><div id="lbBox" class="lb-box hidden"></div></div>
-      </div>
+        <section id="sessionView" class="session hidden">
+          <header class="head">
+            <div class="head-title">
+              <input id="sessionTitle" class="title-input" type="text" aria-label="Scenario name" spellcheck="false" />
+              <div id="sessionMeta" class="meta"></div>
+            </div>
+            <div class="head-actions">
+              <button id="btnReplay" class="btn primary">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.8v10.4L13 8z" /></svg>
+                Replay…
+              </button>
+              <button id="btnRefresh" class="btn ghost icon" title="Reload data" aria-label="Reload data">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 8a5 5 0 1 1-1.5-3.6M13 2.5v2.8h-2.8" /></svg>
+              </button>
+              <button id="btnDelete" class="btn ghost icon danger" title="Delete scenario" aria-label="Delete scenario">
+                <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M6.5 4.5V3h3v1.5M4.5 4.5l.6 8.5h5.8l.6-8.5" /></svg>
+              </button>
+            </div>
+          </header>
+
+          <div id="readouts" class="readouts" aria-label="Scenario health"></div>
+
+          <nav class="views" role="tablist">
+            <button role="tab" data-view="steps" class="active">Steps</button>
+            <button role="tab" data-view="network">Network</button>
+            <button role="tab" data-view="data">Test data</button>
+            <button role="tab" data-view="runs">Runs</button>
+            <button role="tab" data-view="console">Console</button>
+            <button role="tab" data-view="evidence">Evidence</button>
+            <button role="tab" data-view="export">Export</button>
+          </nav>
+
+          <div id="view" class="view"></div>
+        </section>
+
+        <section id="settingsView" class="session hidden">
+          <header class="head"><div class="head-title"><h2 class="title-static">Settings</h2><div class="meta">Capture, replay and export behaviour</div></div></header>
+          <form id="settingsForm" class="settings"></form>
+        </section>
+      </main>
     </div>
+
+    <!-- ============ replay / test data dialog ============ -->
+    <dialog id="dataDialog" class="dialog" aria-labelledby="dataDialogTitle">
+      <form method="dialog" class="dialog-body">
+        <header class="dialog-head">
+          <div>
+            <span class="eyebrow">Replay</span>
+            <h2 id="dataDialogTitle">Test data for this run</h2>
+          </div>
+          <button class="btn ghost icon" value="cancel" aria-label="Close">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 4l8 8M12 4l-8 8" /></svg>
+          </button>
+        </header>
+        <div id="dataDialogContent"></div>
+        <footer class="dialog-foot">
+          <span id="dataDialogHint" class="dim"></span>
+          <span class="grow"></span>
+          <button class="btn ghost" value="cancel">Cancel</button>
+          <button id="btnRunWithData" class="btn primary" value="run">
+            <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 2.8v10.4L13 8z" /></svg>
+            Run in new tab
+          </button>
+        </footer>
+      </form>
+    </dialog>
+
+    <!-- ============ lightbox ============ -->
+    <dialog id="lightbox" class="lightbox" aria-label="Screenshot">
+      <div class="lb-head"><span id="lbCaption" class="mono"></span><button id="lbClose" class="btn ghost icon" aria-label="Close"><svg viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" /></svg></button></div>
+      <div class="lb-stage"><img id="lbImg" alt="Screenshot" /><div id="lbBox" class="target-box hidden"></div></div>
+    </dialog>
+
+    <div id="toasts" class="toasts" aria-live="polite"></div>
 
     <script type="module" src="dashboard.js"></script>
   </body>

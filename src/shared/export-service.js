@@ -28,12 +28,13 @@ export const FORMATS = {
   pack: { label: 'Evidence pack (.zip — everything + screenshots)', ext: 'evidence.zip', mime: 'application/zip' },
 };
 
-export async function loadScenario(sessionId, { secrets = 'placeholder' } = {}) {
+export async function loadScenario(sessionId, { secrets = 'placeholder', data = 'recommended' } = {}) {
   const session = await db.getSession(sessionId);
   if (!session) throw new Error('Session not found');
   const [events, screenshots, settings] = await Promise.all([db.getEvents(sessionId), db.getScreenshots(sessionId), getSettings()]);
   const scenario = buildScenario(session, events, {
     secrets,
+    data,
     sensitiveHeaders: splitLines(settings.sensitiveHeaders),
     screenshots: screenshots.map(({ id, stepEventId, reason, runId }) => ({ id, stepEventId, reason, runId })),
   });

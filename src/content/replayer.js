@@ -180,7 +180,57 @@
     }
   }
 
-  async function exec(step, { timeoutMs = 10000, highlight = true } = {}) {
+  function pointAt(el) {
+    const r = el.getBoundingClientRect();
+    return { clientX: r.left + r.width / 2, clientY: r.top + r.height / 2 };
+  }
+
+  /** HTML5 drag (draggable=true) or a mouse-driven drag library (sortable lists, kanban boards). */
+  async function drag(src, dst, html5) {
+    src.scrollIntoView({ block: 'center', behavior: 'instant' });
+    if (html5 || src.draggable) {
+      const dt = new DataTransfer();
+      const fire = (el, type) => el.dispatchEvent(new DragEvent(type, { bubbles: true, cancelable: true, composed: true, dataTransfer: dt, ...pointAt(el) }));
+      fire(src, 'dragstart');
+      await sleep(30);
+      fire(dst, 'dragenter');
+      fire(dst, 'dragover');
+      await sleep(30);
+      fire(dst, 'drop');
+      fire(src, 'dragend');
+      return;
+    }
+    const from = pointAt(src);
+    const to = pointAt(dst);
+    mouse(src, 'pointerdown', { button: 0, buttons: 1 });
+    mouse(src, 'mousedown', { button: 0, buttons: 1 });
+    for (let i = 1; i <= 8; i++) {
+      const p = { clientX: from.clientX + ((to.clientX - from.clientX) * i) / 8, clientY: from.clientY + ((to.clientY - from.clientY) * i) / 8, buttons: 1 };
+      const over = document.elementFromPoint(p.clientX, p.clientY) || dst;
+      over.dispatchEvent(new PointerEvent('pointermove', { bubbles: true, composed: true, pointerId: 1, isPrimary: true, ...p }));
+      over.dispatchEvent(new MouseEvent('mousemove', { bubbles: true, composed: true, ...p }));
+      await sleep(20);
+    }
+    mouse(dst, 'pointerup', { button: 0 });
+    mouse(dst, 'mouseup', { button: 0 });
+  }
+
+  function hover(el) {
+    el.scrollIntoView({ block: 'center', behavior: 'instant' });
+    mouse(el, 'pointerover');
+    mouse(el, 'mouseover');
+    // Like a real pointer entering a nested element: *enter fires on every ancestor (outermost first).
+    const chain = [];
+    for (let n = el; n && n.nodeType === 1; n = n.parentElement || n.getRootNode().host) chain.unshift(n);
+    for (const n of chain) {
+      mouse(n, 'pointerenter', { bubbles: false });
+      mouse(n, 'mouseenter', { bubbles: false });
+    }
+    mouse(el, 'pointermove');
+    mouse(el, 'mousemove');
+  }
+
+  async function exec(step, { timeoutMs = 10000, highlight = true, afterHover = false } = {}) {
     const a = step.action;
     const needsElement = !['press', 'note', 'screenshot'].includes(a) || step.target;
     if (a === 'assert' && step.assert?.type === 'url') {
@@ -200,8 +250,9 @@
       const hiddenAssert = a === 'assert' && step.assert?.type === 'hidden';
       try {
         // Styled checkboxes/selects often hide the native input, so don't require visibility for them.
-        const needVisible = !['check', 'uncheck', 'select'].includes(a);
-        ({ el, used } = await resolve(step.target, hiddenAssert ? 1500 : timeoutMs, { needEnabled: a !== 'assert', needVisible }));
+        // Menu items revealed by a CSS :hover can't become visible from synthetic events; accept them hidden.
+        const needVisible = !['check', 'uncheck', 'select'].includes(a) && !afterHover;
+        ({ el, used } = await resolve(step.target, hiddenAssert ? 1500 : afterHover ? Math.min(timeoutMs, 2000) : timeoutMs, { needEnabled: a !== 'assert', needVisible }));
       } catch (e) {
         if (hiddenAssert) return { ok: true, actual: 'hidden' };
         throw e;
@@ -237,10 +288,15 @@
         press(el, step);
         break;
       case 'hover':
-        mouse(el, 'pointerover');
-        mouse(el, 'mouseover');
-        mouse(el, 'mouseenter', { bubbles: false });
+        hover(el);
+        await sleep(300); // let the menu open
         break;
+      case 'drag': {
+        const { el: dst } = await resolve(step.dropTarget, timeoutMs, { needEnabled: false });
+        if (highlight) QA.overlay.highlight(dst, { kind: 'replay', label: `drop · ${step.dropTarget.friendly || ''}` });
+        await drag(el, dst, step.html5);
+        break;
+      }
       case 'assert': {
         let r = checkAssertion(el, step.assert || {});
         const end = Date.now() + Math.min(timeoutMs, 5000);

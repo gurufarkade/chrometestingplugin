@@ -15,6 +15,7 @@ export const DEFAULT_SETTINGS = Object.freeze({
   captureResponseBodies: true,
   maxBodyBytes: 100_000,
   captureConsole: true,
+  captureOutcomes: true, // toasts, alerts, validation messages, dialogs after each step
   showOverlay: true,
   maskPasswordsAtCapture: false, // if true, replay of login steps needs env values
   ignoreUrlPatterns: [

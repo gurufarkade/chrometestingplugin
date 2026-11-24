@@ -9,6 +9,8 @@ body { width: 380px; padding: 12px; display: flex; flex-direction: column; gap: 
 .controls button { padding: 8px 4px; font-weight: 600; }
 .controls .rec { display: inline-flex; align-items: center; justify-content: center; gap: 6px; background: var(--rec); border-color: var(--rec); color: #fff; }
 .controls .rec .dot { width: 8px; height: 8px; border-radius: 50%; background: #fff; }
+.data-hint { font-size: 11.5px; color: var(--muted); padding: 6px 8px; border: 1px dashed var(--border); border-radius: 6px; }
+.data-hint b { color: var(--text); }
 .card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px; display: flex; flex-direction: column; gap: 8px; }
 .tools { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
 .tools button { font-size: 12px; padding: 6px 4px; }

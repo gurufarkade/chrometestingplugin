@@ -4,11 +4,16 @@
 
 import * as db from '../shared/db.js';
 import { STATUS, getSettings, splitLines } from '../shared/settings.js';
-import { diffApiCalls, matchesAnyPattern, sameRoute } from '../shared/analysis.js';
+import { matchesAnyPattern, normalizeUrl, sameRoute } from '../shared/analysis.js';
+import { buildDataPlan, resolveData, applyData, createRng } from '../shared/test-data.js';
+import { buildRunReport } from '../shared/run-report.js';
 
+// Must match manifest.json content_scripts order.
 const CONTENT_FILES = [
   'src/content/selectors.js',
   'src/content/overlay.js',
+  'src/content/outcomes.js',
+  'src/content/step-builder.js',
   'src/content/replayer.js',
   'src/content/recorder.js',
 ];
@@ -85,8 +90,8 @@ function broadcast(msg) {
   chrome.runtime.sendMessage(msg).catch(() => {}); // popup/dashboard may be closed
 }
 
-async function sendToTab(tabId, msg, timeoutMs = 0) {
-  const p = chrome.tabs.sendMessage(tabId, msg, { frameId: 0 });
+async function sendToTab(tabId, msg, timeoutMs = 0, frameId = 0) {
+  const p = chrome.tabs.sendMessage(tabId, msg, { frameId });
   if (!timeoutMs) return p;
   return Promise.race([p, sleep(timeoutMs).then(() => Promise.reject(new Error(`Timed out after ${timeoutMs}ms`)))]);
 }
@@ -121,14 +126,20 @@ function contentConfigFor(tabId) {
       captureConsole: s.captureConsole ?? true,
       showOverlay: s.showOverlay ?? true,
       maskPasswordsAtCapture: s.maskPasswordsAtCapture ?? false,
+      captureOutcomes: s.captureOutcomes ?? true,
     },
   };
+}
+
+/** Config goes to every frame of the tab (iframes record too). */
+function broadcastConfig(tabId, config) {
+  chrome.tabs.sendMessage(tabId, { type: 'config', config }).catch(() => {});
 }
 
 async function pushStateToTab() {
   await settings();
   const tabs = new Set([state?.tabId, state?.replay?.tabId].filter(Boolean));
-  for (const tabId of tabs) sendToTab(tabId, { type: 'config', config: contentConfigFor(tabId) }).catch(() => {});
+  for (const tabId of tabs) broadcastConfig(tabId, contentConfigFor(tabId));
 }
 
 async function ensureContentScripts(tabId) {
@@ -138,8 +149,8 @@ async function ensureContentScripts(tabId) {
   } catch {
     /* not injected yet (tab opened before install) */
   }
-  await chrome.scripting.executeScript({ target: { tabId }, files: MAIN_WORLD_FILES, world: 'MAIN' });
-  await chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_FILES });
+  await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: MAIN_WORLD_FILES, world: 'MAIN' });
+  await chrome.scripting.executeScript({ target: { tabId, allFrames: true }, files: CONTENT_FILES });
   await sleep(100);
   return true;
 }
@@ -380,7 +391,7 @@ async function stopRecording() {
   state.status = STATUS.STOPPED;
   state.assertMode = false;
   await saveState();
-  sendToTab(tabId, { type: 'config', config: contentConfigFor(-1) }).catch(() => {});
+  broadcastConfig(tabId, contentConfigFor(-1));
   return publicState();
 }
 
@@ -392,7 +403,7 @@ async function resetCapture() {
   state = structuredClone(EMPTY_STATE);
   cidToEventId.clear();
   await saveState();
-  if (tabId) sendToTab(tabId, { type: 'config', config: contentConfigFor(-1) }).catch(() => {});
+  if (tabId) broadcastConfig(tabId, contentConfigFor(-1));
   return publicState();
 }
 
@@ -543,12 +554,12 @@ async function waitForTabComplete(tabId, timeoutMs) {
   throw new Error(`Page did not finish loading within ${timeoutMs}ms`);
 }
 
-async function waitForContent(tabId, timeoutMs) {
+async function waitForContent(tabId, timeoutMs, frameId = 0) {
   const end = Date.now() + timeoutMs;
   let injected = false;
   while (Date.now() < end) {
     try {
-      const pong = await sendToTab(tabId, { type: 'ping' }, 600);
+      const pong = await sendToTab(tabId, { type: 'ping' }, 600, frameId);
       if (pong?.ok) return true;
     } catch {}
     const tab = await chrome.tabs.get(tabId).catch(() => null);
@@ -558,7 +569,26 @@ async function waitForContent(tabId, timeoutMs) {
     }
     await sleep(200);
   }
-  throw new Error('Page script did not become ready (is this page restricted?)');
+  throw new Error(frameId ? 'The iframe did not become ready' : 'Page script did not become ready (is this page restricted?)');
+}
+
+/** Find the live frameId for a recorded Frame (by name, then by URL route). */
+async function resolveFrameId(tabId, frame, timeoutMs) {
+  if (!frame) return 0;
+  const end = Date.now() + timeoutMs;
+  while (Date.now() < end) {
+    const frames = (await chrome.webNavigation.getAllFrames({ tabId }).catch(() => [])) || [];
+    const sub = frames.filter((f) => f.frameId !== 0);
+    let hit = sub.find((f) => f.url === frame.url) || sub.find((f) => sameRoute(f.url, frame.url));
+    if (!hit && frame.url) {
+      const origin = new URL(frame.url).origin;
+      const sameOrigin = sub.filter((f) => f.url.startsWith(origin));
+      if (sameOrigin.length === 1) hit = sameOrigin[0];
+    }
+    if (hit) return hit.frameId;
+    await sleep(250);
+  }
+  throw new Error(`Iframe ${normalizeUrl(frame.url)} not found on the page`);
 }
 
 /** For each step index, the last URL the recording navigated to before the next step. */
@@ -571,7 +601,7 @@ function expectedUrlsAfterSteps(steps, navs) {
   });
 }
 
-async function executeStep(step, tabId, s) {
+async function executeStep(step, tabId, s, { afterHover = false } = {}) {
   if (step.action === 'goto') {
     await chrome.tabs.update(tabId, { url: step.url });
     await sleep(150);
@@ -587,17 +617,20 @@ async function executeStep(step, tabId, s) {
     return { ok: true };
   }
   if (step.action === 'upload') {
-    return { ok: true, skipped: true, warning: 'File uploads cannot be replayed by an extension; automate with setInputFiles().' };
+    return { ok: true, skipped: true, warning: 'File uploads cannot be replayed by an extension; the exported specs use setInputFiles()/selectFile().' };
   }
   if (step.action === 'screenshot') return { ok: true };
+  if (step.action === 'fill' && step.dataMissing) return { ok: false, error: `No value supplied for "${step.target?.friendly}" (one-time code / custom data)` };
 
-  await waitForContent(tabId, s.replayTimeoutMs);
+  const frameId = await resolveFrameId(tabId, step.frame, s.replayTimeoutMs);
+  await waitForContent(tabId, s.replayTimeoutMs, frameId);
   let res;
   try {
     res = await sendToTab(
       tabId,
-      { type: 'replay:exec', step, options: { timeoutMs: s.replayTimeoutMs, highlight: s.replayHighlight } },
+      { type: 'replay:exec', step, options: { timeoutMs: s.replayTimeoutMs, highlight: s.replayHighlight, afterHover } },
       s.replayTimeoutMs + 3000,
+      frameId,
     );
   } catch (e) {
     // The action may have triggered a navigation that tore down the message port.
@@ -605,10 +638,28 @@ async function executeStep(step, tabId, s) {
     if (tab && (tab.status === 'loading' || /port closed|receiving end/i.test(e.message))) res = { ok: true, warning: 'Page navigated during action' };
     else throw e;
   }
+  if (res) res.frameId = frameId;
   return res || { ok: false, error: 'No response from page' };
 }
 
-async function startReplay({ sessionId, tabId }) {
+/** Outcomes (toasts, validation…) seen while recording should appear again. Soft check → warning. */
+async function verifyOutcomes(tabId, step, frameId) {
+  const outcomes = (step.outcomes || []).filter((o) => !o.ignored && !o.native);
+  if (!outcomes.length) return null;
+  const ask = (fid) => sendToTab(tabId, { type: 'replay:verifyOutcomes', outcomes, timeoutMs: 3000 }, 4000, fid).catch(() => ({ seen: [], missing: outcomes }));
+  let r = await ask(frameId || 0);
+  if (r.missing?.length && frameId) {
+    const top = await ask(0); // toasts usually live in the top document
+    r = { seen: [...r.seen, ...top.seen], missing: r.missing.filter((m) => !top.seen.some((x) => x.text === m.text)) };
+  }
+  return r;
+}
+
+/**
+ * Replay a Scenario in a tab.
+ * data = { mode: 'recommended'|'recorded'|'fresh', strategies, custom, seed } — the tester's Test data choice.
+ */
+async function startReplay({ sessionId, tabId, data }) {
   await loadState();
   if (isActive()) await stopRecording();
   if (state.status === STATUS.REPLAYING) throw new Error('A replay is already running.');
@@ -619,10 +670,28 @@ async function startReplay({ sessionId, tabId }) {
   const s = await settings();
   const allSteps = await db.getEvents(sessionId, { runId: null, kind: 'step' });
   const navs = await db.getEvents(sessionId, { runId: null, kind: 'navigation' });
-  const steps = allSteps.filter((st) => !SKIP_ON_REPLAY.has(st.action) && !st.skip);
+
+  // Test data for this Run
+  const plan = buildDataPlan(allSteps);
+  const resolved = resolveData(plan, data || { mode: 'recorded' }, { rng: createRng(data?.seed) });
+  const missing = new Set(resolved.fields.filter((f) => f.missing).map((f) => f.stepId));
+  const steps = applyData(allSteps, resolved)
+    .filter((st) => !SKIP_ON_REPLAY.has(st.action) && !st.skip)
+    .map((st) => (missing.has(st.id) ? { ...st, dataMissing: true } : st));
   const expectedUrls = expectedUrlsAfterSteps(steps, navs);
 
-  const run = { id: uid('run'), startedAt: Date.now(), tabId, status: 'running', results: [], total: steps.length };
+  const run = {
+    id: uid('run'),
+    startedAt: Date.now(),
+    tabId,
+    status: 'running',
+    results: [],
+    total: steps.length,
+    data: {
+      mode: data?.mode || 'recorded',
+      fields: resolved.fields.map((f) => ({ key: f.key, label: f.label, kind: f.kind, strategy: f.strategy, value: f.secret ? '••••' : f.value })),
+    },
+  };
   session.runs = [...(session.runs || []), run].slice(-MAX_RUNS_KEPT);
   await db.putSession(session);
 
@@ -637,11 +706,7 @@ async function startReplay({ sessionId, tabId }) {
     let failed = false;
     for (let i = 0; i < steps.length; i++) {
       const step = steps[i];
-      if (replayCancelled) {
-        run.results.push({ stepId: step.id, index: i, action: step.action, status: 'not-run' });
-        continue;
-      }
-      if (failed && !s.replayContinueOnFailure) {
+      if (replayCancelled || (failed && !s.replayContinueOnFailure)) {
         run.results.push({ stepId: step.id, index: i, action: step.action, status: 'not-run' });
         continue;
       }
@@ -650,11 +715,12 @@ async function startReplay({ sessionId, tabId }) {
       await pushStateToTab();
       const t0 = Date.now();
       const result = { stepId: step.id, index: i, action: step.action, status: 'passed' };
+      const warnings = [];
       try {
-        const res = await executeStep(step, tabId, s);
+        const res = await executeStep(step, tabId, s, { afterHover: steps[i - 1]?.action === 'hover' });
         if (!res.ok) throw new Error(res.error || 'Step failed');
         if (res.skipped) result.status = 'skipped';
-        if (res.warning) result.warning = res.warning;
+        if (res.warning) warnings.push(res.warning);
         if (res.usedSelector) result.usedSelector = res.usedSelector;
         if (res.actual !== undefined) result.actual = res.actual;
 
@@ -673,7 +739,14 @@ async function startReplay({ sessionId, tabId }) {
             current = (await chrome.tabs.get(tabId)).url;
           }
           result.urlCheck = { expected, actual: current, match: sameRoute(current, expected) };
-          if (!result.urlCheck.match) result.warning = `Expected to land on ${expected} but was ${current}`;
+          if (!result.urlCheck.match) warnings.push(`Expected to land on ${expected} but was ${current}`);
+        }
+        const outcomeCheck = await verifyOutcomes(tabId, step, res.frameId);
+        if (outcomeCheck) {
+          result.outcomes = { seen: outcomeCheck.seen.map((o) => o.text), missing: outcomeCheck.missing.map((o) => o.text) };
+          const required = outcomeCheck.missing.filter((o) => o.required);
+          if (required.length) throw new Error(`Required result not shown: ${required.map((o) => `"${o.text}"`).join(', ')}`);
+          if (outcomeCheck.missing.length) warnings.push(`Expected result not shown: ${outcomeCheck.missing.map((o) => `"${o.text}"`).join(', ')}`);
         }
         if (s.replayWaitForNetworkIdle) await sendToTab(tabId, { type: 'replay:waitIdle', timeoutMs: 5000 }, 6000).catch(() => {});
       } catch (e) {
@@ -681,6 +754,7 @@ async function startReplay({ sessionId, tabId }) {
         result.error = e.message || String(e);
         failed = true;
       }
+      if (warnings.length) result.warning = warnings.join(' · ');
       result.durationMs = Date.now() - t0;
       result.screenshotId = await queueScreenshot({ tabId, stepEventId: step.id, reason: `replay-${result.status}`, runId: run.id });
       run.results.push(result);
@@ -690,12 +764,14 @@ async function startReplay({ sessionId, tabId }) {
     }
 
     run.endedAt = Date.now();
-    run.status = replayCancelled ? 'cancelled' : run.results.some((r) => r.status === 'failed') ? 'failed' : 'passed';
-    const recordedNet = await db.getEvents(sessionId, { runId: null, kind: 'network' });
-    const replayNet = await db.getEvents(sessionId, { runId: run.id, kind: 'network' });
-    const replayConsole = await db.getEvents(sessionId, { runId: run.id, kind: 'console' });
-    run.apiDiff = diffApiCalls(recordedNet, replayNet);
-    run.consoleErrors = replayConsole.filter((c) => c.level === 'error').length;
+    const report = buildRunReport({
+      results: run.results,
+      recordedNetwork: await db.getEvents(sessionId, { runId: null, kind: 'network' }),
+      replayNetwork: await db.getEvents(sessionId, { runId: run.id, kind: 'network' }),
+      replayConsole: await db.getEvents(sessionId, { runId: run.id, kind: 'console' }),
+      cancelled: replayCancelled,
+    });
+    Object.assign(run, { status: report.status, report });
     await persistRun(sessionId, run);
 
     state = {
@@ -706,7 +782,7 @@ async function startReplay({ sessionId, tabId }) {
       lastRun: { sessionId, runId: run.id, status: run.status },
     };
     await saveState();
-    sendToTab(tabId, { type: 'config', config: contentConfigFor(-1) }).catch(() => {});
+    broadcastConfig(tabId, contentConfigFor(-1));
     sendToTab(tabId, { type: 'replay:done', status: run.status }).catch(() => {});
     broadcast({ type: 'replay:done', sessionId, run });
   })();
@@ -753,7 +829,7 @@ const handlers = {
     return publicState();
   },
   async replay(msg) {
-    return startReplay({ sessionId: msg.sessionId, tabId: msg.tabId ?? (await activeTabId()) });
+    return startReplay({ sessionId: msg.sessionId, tabId: msg.tabId ?? (await activeTabId()), data: msg.data });
   },
   async stopReplay() {
     replayCancelled = true;

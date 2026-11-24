@@ -5,6 +5,8 @@
 
 import { apiSignature, isApiLike, maskHeaders, normalizeUrl, sameRoute } from './analysis.js';
 import { createZip, dataUrlToBytes } from './zip.js';
+import { buildDataPlan, resolveData, generatorSource, dataHelpersSource, createRng, camel } from './test-data.js';
+import { buildRunReport } from './run-report.js';
 
 export const SECRET_MODES = Object.freeze({ PLACEHOLDER: 'placeholder', INCLUDE: 'include', MASK: 'mask' });
 
@@ -18,12 +20,6 @@ export function q(s) {
 const tq = (s) => `\`${String(s).replace(/\\/g, '\\\\').replace(/`/g, '\\`')}\``; // template literal (keeps ${…})
 export function slugify(s) {
   return String(s || 'scenario').toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 60) || 'scenario';
-}
-function camel(s) {
-  const words = String(s || '').replace(/[^a-zA-Z0-9]+/g, ' ').trim().split(/\s+/).filter(Boolean).slice(0, 5);
-  if (!words.length) return 'field';
-  const out = words.map((w, i) => (i === 0 ? w.toLowerCase() : w[0].toUpperCase() + w.slice(1).toLowerCase())).join('');
-  return /^\d/.test(out) ? `f${out}` : out;
 }
 function truncate(s, n) {
   if (s == null) return s;
@@ -88,7 +84,6 @@ export function buildScenario(session, events, opts = {}) {
   const credentials = [];
   const testData = {};
   const valueRefs = new Map(); // step id -> { kind: 'credential'|'data', key }
-  const usedKeys = new Set();
   const varCount = {};
   const nextVar = (base) => {
     varCount[base] = (varCount[base] || 0) + 1;
@@ -113,18 +108,6 @@ export function buildScenario(session, events, opts = {}) {
       }
     }
   });
-  for (const s of fills) {
-    if (valueRefs.has(s.id)) continue;
-    let key = camel(s.target?.label || s.target?.placeholder || s.target?.nameAttr || s.target?.name || s.target?.id || 'field');
-    if (usedKeys.has(key)) {
-      let n = 2;
-      while (usedKeys.has(`${key}${n}`)) n++;
-      key = `${key}${n}`;
-    }
-    usedKeys.add(key);
-    testData[key] = s.value ?? '';
-    valueRefs.set(s.id, { kind: 'data', key });
-  }
   credentials.sort((a, b) => (a.role === 'username' ? -1 : 0) - (b.role === 'username' ? -1 : 0));
   const credByVar = new Map(credentials.map((c) => [c.variable, c]));
 
@@ -134,6 +117,23 @@ export function buildScenario(session, events, opts = {}) {
     if (secrets === SECRET_MODES.MASK) return '********';
     return `<${variable}>`;
   };
+
+  // Test data: the Data plan knows what each field is and whether a Run should reuse or regenerate it.
+  // opts.data: 'recommended' (default) | 'recorded' | 'fresh' — which values the exported specs use.
+  const dataMode = opts.data || 'recommended';
+  const plan = buildDataPlan(rawSteps, { now: opts.now });
+  const effective = resolveData(plan, { mode: dataMode }, { rng: createRng(1), now: opts.now }).fields;
+  const testDataSource = {}; // key -> JS expression for fresh values
+  const dataPlan = effective.map((f) => {
+    const ref = valueRefs.get(f.stepId);
+    const row = { key: f.key, label: f.label, kind: f.kind, strategy: f.strategy, reason: f.reason, recorded: ref?.kind === 'credential' ? secretDisplay(ref.variable) : f.recorded, envVar: ref?.variable };
+    if (!ref && f.action === 'fill') {
+      testData[f.key] = f.recorded;
+      if (f.strategy === 'fresh') testDataSource[f.key] = generatorSource(f);
+      valueRefs.set(f.stepId, { kind: 'data', key: f.key, fresh: f.strategy === 'fresh' });
+    }
+    return row;
+  });
 
   // ---- api call shaping
   const shapeApi = (e) => ({
@@ -188,7 +188,11 @@ export function buildScenario(session, events, opts = {}) {
       note: s.note,
       flag: s.flag,
       via: s.via,
-      target: s.target ? summarizeTarget(s.target) : undefined,
+      html5: s.html5,
+      frame: s.frame || undefined,
+      outcomes: (s.outcomes || []).filter((o) => !o.ignored),
+      target: s.target ? summarizeTarget(s.target, s.frame) : undefined,
+      dropTarget: s.dropTarget ? summarizeTarget(s.dropTarget, s.frame) : undefined,
       apiCalls: triggered.map(shapeApi),
       navigatedTo: navigatedTo && !sameRoute(navigatedTo, s.url || '') ? navigatedTo : null,
       screenshot: shot ? `screenshots/${screenshotName(i + 1, s.action, shot)}` : null,
@@ -216,6 +220,10 @@ export function buildScenario(session, events, opts = {}) {
     secretsMode: secrets,
     credentials: credentials.map((c) => ({ ...c, value: secretDisplay(c.variable) })),
     testData,
+    testDataSource,
+    dataMode,
+    dataIntent: plan.intent,
+    dataPlan,
     steps,
     apis,
     endpoints,
@@ -241,7 +249,7 @@ function screenshotName(n, action, shot) {
   return `step-${String(n).padStart(2, '0')}-${action}.jpg`;
 }
 
-function summarizeTarget(t) {
+function summarizeTarget(t, frame) {
   return {
     friendly: t.friendly,
     tag: t.tag,
@@ -258,8 +266,8 @@ function summarizeTarget(t) {
     viewport: t.viewport,
     html: t.html,
     locators: {
-      playwright: playwrightLocator(t),
-      cypress: cypressLocator(t),
+      playwright: playwrightLocator(t, frame),
+      cypress: cypressLocator(t, frame),
       css: (t.candidates || []).find((c) => c.css && c.unique)?.css || (t.candidates || []).find((c) => c.css)?.css,
       xpath: (t.candidates || []).find((c) => c.type === 'xpath')?.value,
     },
@@ -267,23 +275,19 @@ function summarizeTarget(t) {
 }
 
 function summarizeRun(r) {
-  const counts = { passed: 0, failed: 0, skipped: 0, 'not-run': 0 };
-  for (const x of r.results || []) counts[x.status] = (counts[x.status] || 0) + 1;
+  const report = r.report || buildRunReport({ results: r.results || [] });
+  const diff = r.report?.apiDiff || r.apiDiff;
   return {
     id: r.id,
     status: r.status,
+    headline: report.headline,
     startedAt: fmtDate(r.startedAt),
     durationMs: r.endedAt ? r.endedAt - r.startedAt : undefined,
-    counts,
+    counts: report.counts,
+    issues: report.issues,
+    data: r.data?.mode,
     failures: (r.results || []).filter((x) => x.status === 'failed').map((x) => ({ index: x.index + 1, action: x.action, error: x.error })),
-    apiDiff: r.apiDiff
-      ? {
-          missing: r.apiDiff.missing,
-          unexpected: r.apiDiff.unexpected,
-          statusChanged: r.apiDiff.statusChanged,
-          slower: r.apiDiff.slower,
-        }
-      : null,
+    apiDiff: diff ? { missing: diff.missing, unexpected: diff.unexpected, statusChanged: diff.statusChanged, slower: diff.slower } : null,
   };
 }
 
@@ -342,7 +346,9 @@ export function describeStep(s) {
     case 'upload':
       return `Upload ${(s.files || []).map((f) => f.name).join(', ') || 'a file'} via ${name}`;
     case 'hover':
-      return `Hover over ${name}`;
+      return `Hover over the ${name} ${noun(t)}${where(t)}`;
+    case 'drag':
+      return `Drag ${name} onto "${s.dropTarget?.friendly || 'target'}"`;
     case 'assert': {
       const a = s.assert || {};
       if (a.type === 'url') return `Verify the page URL is ${a.expected}`;
@@ -365,11 +371,26 @@ function expectedResult(s) {
   const parts = [];
   if (s.action === 'assert') parts.push(describeStep(s).replace(/^Verify /, '') + ' ✔');
   if (s.navigatedTo) parts.push(`User lands on ${routePath(s.navigatedTo)}`);
+  for (const o of s.outcomes || []) parts.push(outcomeText(o));
   for (const a of s.apiCalls.slice(0, 4)) parts.push(`${a.method} ${a.route} → ${a.status || 'ERR'}`);
   if (s.action === 'goto' && !parts.length) parts.push('Page loads successfully');
   if (s.action === 'fill' && !parts.length) parts.push('Value is accepted by the field');
   if (!parts.length && s.action !== 'note') parts.push('Action completes without errors');
   return parts.join('; ');
+}
+
+export function candidateLabel(c) {
+  if (c.type === 'scoped') return `${c.scope.kind} "${c.scope.text}" › ${candidateLabel(c.inner)}`;
+  if (c.type === 'role') return `role:${c.role}="${c.name}"`;
+  if (c.shadow?.length) return `shadow:${[...c.shadow, c.css].join(' » ')}`;
+  return `${c.type}=${c.value ?? c.css}`;
+}
+
+export function outcomeText(o) {
+  if (o.kind === 'title') return `Page title becomes "${o.text}"`;
+  if (o.kind === 'dialog') return `Dialog "${o.text}" opens`;
+  if (o.kind === 'validation') return `Shows validation "${o.text}"${o.field ? ` on ${o.field}` : ''}`;
+  return `Shows "${o.text}"`;
 }
 
 // ------------------------------------------------------------------ locators
@@ -379,47 +400,65 @@ function bestCandidate(t, accept = () => true) {
   return c.find((x) => x.unique) || c[0] || null;
 }
 
-export function playwrightLocator(t) {
-  const c = bestCandidate(t, (x) => x.type !== 'xpath') || bestCandidate(t);
-  if (!c) return 'page.locator(\'body\')';
-  let loc;
+/** One candidate as a Playwright locator chained from `root` ("page", a frameLocator, or a scope). */
+function pwFrom(root, c) {
   switch (c.type) {
     case 'testid':
-      loc = c.attr === 'data-testid' ? `page.getByTestId(${q(c.value)})` : `page.locator(${q(c.css)})`;
-      break;
+      return c.attr === 'data-testid' ? `${root}.getByTestId(${q(c.value)})` : `${root}.locator(${q(c.css)})`;
     case 'role':
-      loc = `page.getByRole(${q(c.role)}, { name: ${q(c.name)}, exact: true })`;
-      break;
+      return `${root}.getByRole(${q(c.role)}, { name: ${q(c.name)}, exact: true })`;
     case 'label':
-      loc = `page.getByLabel(${q(c.value)}, { exact: true })`;
-      break;
+      return `${root}.getByLabel(${q(c.value)}, { exact: true })`;
     case 'placeholder':
-      loc = `page.getByPlaceholder(${q(c.value)}, { exact: true })`;
-      break;
+      return `${root}.getByPlaceholder(${q(c.value)}, { exact: true })`;
     case 'text':
-      loc = `page.getByText(${q(c.value)}, { exact: true })`;
-      break;
+      return `${root}.getByText(${q(c.value)}, { exact: true })`;
     case 'xpath':
-      loc = `page.locator(${q(`xpath=${c.value}`)})`;
-      break;
+      return `${root}.locator(${q(`xpath=${c.value}`)})`;
+    case 'scoped': {
+      const scope = c.scope.role ? `${root}.getByRole(${q(c.scope.role)})` : `${root}.locator(${q(c.scope.css)})`;
+      return pwFrom(`${scope}.filter({ hasText: ${q(c.scope.text)} })`, c.inner);
+    }
     default:
-      loc = `page.locator(${q(c.css || c.value)})`;
+      if (c.shadow?.length) return [...c.shadow, c.css].reduce((acc, sel) => `${acc}.locator(${q(sel)})`, root);
+      return `${root}.locator(${q(c.css || c.value)})`;
   }
+}
+
+export function playwrightLocator(t, frame) {
+  const c = bestCandidate(t, (x) => x.type !== 'xpath') || bestCandidate(t);
+  const root = frame?.selector ? `page.frameLocator(${q(frame.selector)})` : 'page';
+  if (!c) return `${root}.locator('body')`;
+  const loc = pwFrom(root, c);
   return c.unique ? loc : `${loc}.first()`;
 }
 
-export function cypressLocator(t) {
+export function cypressLocator(t, frame) {
   const cands = t?.candidates || [];
-  const cssUnique = cands.find((x) => x.css && x.unique && ['testid', 'id', 'name', 'placeholder', 'aria'].includes(x.type));
-  if (cssUnique) return `cy.get(${q(cssUnique.css)})`;
+  // Inside an iframe everything is found from the frame body (qaIframe helper in the spec).
+  const root = frame?.selector ? `qaIframe(${q(frame.selector)})` : null;
+  const get = (css) => (root ? `${root}.find(${q(css)})` : `cy.get(${q(css)})`);
+  const contains = (tag, text) => (root ? `${root}.contains(${q(tag)}, ${q(text)})` : `cy.contains(${q(tag)}, ${q(text)})`);
+
+  const shadow = cands.find((x) => x.shadow?.length);
+  if (shadow) return [...shadow.shadow.slice(1), shadow.css].reduce((acc, sel) => `${acc}.shadow().find(${q(sel)})`, `cy.get(${q(shadow.shadow[0])})`);
+  const cssUnique = cands.find((x) => x.css && x.unique && ['testid', 'id', 'name', 'placeholder', 'aria', 'attr'].includes(x.type));
+  if (cssUnique) return get(cssUnique.css);
   const textual = cands.find((x) => x.unique && (x.type === 'text' || x.type === 'role'));
-  if (textual && t.tag) return `cy.contains(${q(t.tag)}, ${q(textual.type === 'text' ? textual.value : textual.name)})`;
+  if (textual && t.tag && !root) return contains(t.tag, textual.type === 'text' ? textual.value : textual.name);
+  const scoped = cands.find((x) => x.type === 'scoped' && x.unique);
+  if (scoped) {
+    const inner = scoped.inner;
+    const tail = inner.type === 'role' || inner.type === 'text' ? `.contains(${q(t.tag)}, ${q(inner.name || inner.value)})` : `.find(${q(inner.css)})`;
+    return `${contains(scoped.scope.css, scoped.scope.text)}${tail}`;
+  }
   const label = cands.find((x) => x.unique && x.type === 'label');
-  if (label && t.id) return `cy.get(${q(`#${t.id}`)})`;
+  if (label && t.id) return get(`#${t.id}`);
   const css = cands.find((x) => x.type === 'css');
-  if (css) return `cy.get(${q(css.css)})${css.unique ? '' : '.first()'}`;
+  if (css) return `${get(css.css)}${css.unique ? '' : '.first()'}`;
+  if (textual && t.tag) return contains(t.tag, textual.type === 'text' ? textual.value : textual.name);
   const any = cands.find((x) => x.css);
-  return any ? `cy.get(${q(any.css)}).first()` : "cy.get('body')";
+  return any ? `${get(any.css)}.first()` : "cy.get('body')";
 }
 
 // ------------------------------------------------------------------ value expressions
@@ -451,7 +490,30 @@ function credentialsBlock(scn, lang) {
 function testDataBlock(scn) {
   const entries = Object.entries(scn.testData);
   if (!entries.length) return '';
-  return `const testData = {\n${entries.map(([k, v]) => `  ${k}: ${q(v)},`).join('\n')}\n};\n`;
+  const src = scn.testDataSource || {};
+  const fresh = Object.keys(src).length;
+  const lines = entries.map(([k, v]) => (src[k] ? `  ${k}: ${src[k]}, // recorded: ${q(v)}` : `  ${k}: ${q(v)},`));
+  return `${fresh ? `${dataHelpersSource()}\n\n` : ''}// Test data (${fresh ? 'fresh values are generated on every run' : 'values from the recording'})\nconst testData = {\n${lines.join('\n')}\n};\n`;
+}
+
+/** Outcome text that embeds a value we now generate fresh can't be asserted literally. */
+function dependsOnFreshData(scn, text) {
+  return Object.keys(scn.testDataSource || {}).some((k) => String(scn.testData[k]).length >= 3 && String(text).includes(scn.testData[k]));
+}
+
+function playwrightOutcome(scn, o) {
+  if (o.native) return `// Browser validation${o.field ? ` on "${o.field}"` : ''}: ${o.text}`;
+  if (dependsOnFreshData(scn, o.text)) return `// Expected (contains generated data): ${o.text}`;
+  if (o.kind === 'title') return `await expect(page).toHaveTitle(${q(o.text)});`;
+  if (o.kind === 'dialog') return `await expect(page.getByRole('dialog', { name: ${q(o.text)} })).toBeVisible();`;
+  return `await expect(page.getByText(${q(o.text)})).toBeVisible();`;
+}
+
+function cypressOutcome(scn, o) {
+  if (o.native) return `// Browser validation${o.field ? ` on "${o.field}"` : ''}: ${o.text}`;
+  if (dependsOnFreshData(scn, o.text)) return `// Expected (contains generated data): ${o.text}`;
+  if (o.kind === 'title') return `cy.title().should('eq', ${q(o.text)});`;
+  return `cy.contains(${q(o.text)}).should('be.visible');`;
 }
 
 // ------------------------------------------------------------------ Playwright
@@ -507,6 +569,9 @@ export function toPlaywright(scn) {
       case 'hover':
         body.push(`await ${loc}.hover();`);
         break;
+      case 'drag':
+        body.push(`await ${loc}.dragTo(${s.dropTarget.locators.playwright});`);
+        break;
       case 'fill':
         body.push(`await ${loc}.fill(${valueExprPW(s)});`);
         break;
@@ -544,6 +609,7 @@ export function toPlaywright(scn) {
       else body.push(`await ${v};`);
     });
     if (s.navigatedTo) body.push(`await expect(page).toHaveURL(${pathRegexLiteral(s.navigatedTo)});`);
+    for (const o of s.outcomes || []) body.push(playwrightOutcome(scn, o));
 
     if (s.action === 'note') {
       L.push(`    ${body.join('\n    ')}`);
@@ -622,6 +688,11 @@ export function toCypress(scn) {
   if (cb) L.push(cb);
   const tb = testDataBlock(scn);
   if (tb) L.push(tb);
+  if (scn.steps.some((s) => s.frame?.selector)) {
+    L.push('// Elements inside an iframe (same-origin; set chromeWebSecurity: false for cross-origin frames)');
+    L.push("const qaIframe = (sel) => cy.get(sel).its('0.contentDocument.body').should('not.be.empty').then(cy.wrap);");
+    L.push('');
+  }
   L.push(`describe(${q(scn.name)}, () => {`);
   const vp = scn.environment?.viewport;
   if (intercepts.length || vp?.width) {
@@ -649,8 +720,21 @@ export function toCypress(scn) {
         L.push(`    ${loc}.dblclick();`);
         break;
       case 'hover':
-        L.push(`    ${loc}.trigger('mouseover');`);
+        L.push(`    ${loc}.trigger('mouseover'); // CSS-only :hover menus need cypress-real-events: .realHover()`);
         break;
+      case 'drag': {
+        const dst = s.dropTarget.locators.cypress;
+        if (s.html5) {
+          if (!L.some((l) => l.includes('const dataTransfer = new DataTransfer();'))) L.push('    const dataTransfer = new DataTransfer();');
+          L.push(`    ${loc}.trigger('dragstart', { dataTransfer });`);
+          L.push(`    ${dst}.trigger('dragover', { dataTransfer }).trigger('drop', { dataTransfer });`);
+          L.push(`    ${loc}.trigger('dragend', { dataTransfer });`);
+        } else {
+          L.push(`    ${loc}.trigger('mousedown', { button: 0 });`);
+          L.push(`    ${dst}.trigger('mousemove').trigger('mouseup', { force: true });`);
+        }
+        break;
+      }
       case 'fill': {
         const sensitive = s.valueRef?.kind === 'credential';
         const opts = `{ delay: 0, parseSpecialCharSequences: false${sensitive ? ', log: false' : ''} }`;
@@ -691,6 +775,7 @@ export function toCypress(scn) {
       else L.push(`    cy.wait('@${alias}');`);
     });
     if (s.navigatedTo) L.push(`    cy.location('pathname').should('match', ${pathRegexLiteral(s.navigatedTo).replace('(?:[?#]|$)', '$')});`);
+    for (const o of s.outcomes || []) L.push(`    ${cypressOutcome(scn, o)}`);
   }
   L.push('  });');
   L.push('});');
@@ -925,12 +1010,14 @@ export function toAiContext(scn) {
     L.push('```');
   } else L.push('_No credential fields were detected in this scenario._');
   L.push('');
-  if (Object.keys(scn.testData).length) {
-    L.push('## Test data (non-secret values typed by the tester)');
+  if (scn.dataPlan?.length) {
+    L.push('## Test data plan');
     L.push('');
-    L.push('```json');
-    L.push(JSON.stringify(scn.testData, null, 2));
-    L.push('```');
+    L.push(`Detected scenario type: **${scn.dataIntent}**. "fresh" fields must get new realistic values on every run (generate them; respect the constraints); "recorded" fields keep the tester's value; "custom" fields must be supplied at run time.`);
+    L.push('');
+    L.push('| Key | Field | Kind | Strategy | Why | Recorded value |');
+    L.push('|---|---|---|---|---|---|');
+    for (const f of scn.dataPlan) L.push(`| \`${f.envVar || f.key}\` | ${mdEscape(f.label)} | ${f.kind} | ${f.strategy} | ${mdEscape(f.reason)} | ${mdEscape(truncate(String(f.recorded ?? ''), 80))} |`);
     L.push('');
   }
   L.push('## Steps');
@@ -944,9 +1031,12 @@ export function toAiContext(scn) {
       const t = s.target;
       L.push(`- **Element:** \`<${t.tag}${t.type ? ` type="${t.type}"` : ''}>\` ${t.role ? `role=\`${t.role}\`` : ''} name="${mdEscape(t.name || t.friendly)}"${Object.keys(t.context || {}).length ? ` · context: ${mdEscape(JSON.stringify(t.context))}` : ''}`);
       L.push(`- **Suggested locators:** Playwright \`${t.locators.playwright}\` · Cypress \`${t.locators.cypress}\``);
-      L.push(`- **All candidates (ranked):** ${(t.candidates || []).map((c) => `\`${c.type}${c.role ? `:${c.role}` : ''}=${mdEscape(c.name || c.value || c.css)}\`${c.unique ? '' : ' (not unique)'}`).join(', ')}`);
+      L.push(`- **All candidates (ranked):** ${(t.candidates || []).map((c) => `\`${mdEscape(candidateLabel(c))}\`${c.unique ? '' : ' (not unique)'}`).join(', ')}`);
       if (t.html) L.push(`- **HTML:** \`${mdEscape(truncate(t.html, 240))}\``);
     }
+    if (s.frame) L.push(`- **Frame:** ${s.frame.selector || s.frame.name || ''} (${s.frame.url})`);
+    if (s.dropTarget) L.push(`- **Drop target:** "${mdEscape(s.dropTarget.friendly)}" · Playwright \`${s.dropTarget.locators.playwright}\`${s.html5 ? ' (HTML5 drag-and-drop)' : ' (mouse-driven drag)'}`);
+    if (s.outcomes?.length) L.push(`- **Expected results seen:** ${s.outcomes.map((o) => `${o.kind} "${mdEscape(o.text)}"`).join(', ')}`);
     if (s.assert) L.push(`- **Verification:** ${s.assert.type}${s.assert.expected !== undefined ? ` = \`${mdEscape(truncate(String(s.assert.expected), 200))}\`` : ''}`);
     if (s.apiCalls.length) {
       L.push('- **API calls triggered:**');

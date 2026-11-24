@@ -81,6 +81,7 @@ function render(s) {
     timer = setInterval(() => ($('sTime').textContent = fmtTime(Date.now() - base)), 500);
   }
   renderLastRun();
+  renderDataHint().catch(() => {});
 }
 
 async function renderLastRun() {
@@ -93,7 +94,7 @@ async function renderLastRun() {
   if (!run) return box.classList.add('hidden');
   const counts = { passed: 0, failed: 0, skipped: 0, 'not-run': 0 };
   run.results.forEach((x) => (counts[x.status] = (counts[x.status] || 0) + 1));
-  const d = run.apiDiff || {};
+  const d = run.report?.apiDiff || run.apiDiff || {};
   const issues = [];
   const failed = run.results.find((x) => x.status === 'failed');
   if (failed) issues.push(`Step ${failed.index + 1}: ${failed.error}`);
@@ -130,7 +131,39 @@ $('btnStop').addEventListener('click', async () => {
   const res = await act('stop');
   if (res) flash('Recording saved. Open the dashboard to review or export.');
 });
-$('btnRerun').addEventListener('click', () => act('replay', { sessionId: state?.sessionId }));
+/** Decide how Rerun treats Test data: saved choice → use it; needs a decision → ask in the workbench; else recorded. */
+async function rerunDecision(sessionId) {
+  const { getSession, getEvents } = await import('../shared/db.js');
+  const { buildDataPlan } = await import('../shared/test-data.js');
+  const session = await getSession(sessionId);
+  const steps = (await getEvents(sessionId, { runId: null, kind: 'step' })).filter((s) => !s.skip);
+  const plan = buildDataPlan(steps);
+  const needsInput = plan.fields.some((f) => f.strategy === 'custom');
+  if (needsInput) return { ask: true, plan, why: 'needs a one-time code / custom value' };
+  if (session?.dataChoice) return { data: { mode: 'recommended', ...session.dataChoice }, plan, why: 'uses your saved data choice' };
+  if (plan.needsDecision) return { ask: true, plan, why: `${plan.intent} flow — fresh data recommended` };
+  return { data: { mode: 'recorded' }, plan, why: 'reuses the recorded data' };
+}
+
+async function renderDataHint() {
+  const el = $('dataHint');
+  if (!state?.sessionId || state.status !== STATUS.STOPPED) return el.classList.add('hidden');
+  const d = await rerunDecision(state.sessionId);
+  if (!d.plan.fields.length) return el.classList.add('hidden');
+  el.replaceChildren('Rerun ', Object.assign(document.createElement('b'), { textContent: d.ask ? 'asks which test data to use' : d.why }), d.ask ? ` (${d.why}).` : '.');
+  el.classList.remove('hidden');
+}
+
+$('btnRerun').addEventListener('click', async () => {
+  const sid = state?.sessionId;
+  try {
+    const d = await rerunDecision(sid);
+    if (d.ask) return act('openDashboard', { sessionId: `${sid}/replay` });
+    act('replay', { sessionId: sid, data: d.data });
+  } catch (e) {
+    flash(e.message, true);
+  }
+});
 $('btnStopReplay').addEventListener('click', () => act('stopReplay'));
 $('btnReset').addEventListener('click', () => {
   if (confirm('Discard the current capture (steps, API calls and screenshots)? This cannot be undone.')) act('reset');

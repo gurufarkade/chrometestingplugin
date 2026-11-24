@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Fixture App</title>
+    <style>
+      body { font: 14px system-ui, sans-serif; margin: 16px; }
+      section { border: 1px solid #ccc; padding: 10px; margin-bottom: 10px; }
+      .menu { position: relative; display: inline-block; }
+      .menu > ul { display: none; position: absolute; top: 100%; left: 0; margin: 0; padding: 4px; list-style: none; background: #fff; border: 1px solid #999; }
+      .menu:hover > ul { display: block; }
+      .jsmenu ul { display: none; list-style: none; margin: 0; padding: 4px; border: 1px solid #999; }
+      .jsmenu.open ul { display: block; }
+      .lane { display: inline-block; vertical-align: top; width: 160px; min-height: 60px; border: 1px dashed #999; padding: 4px; margin-right: 8px; }
+      .card { padding: 6px; margin: 4px 0; background: #eef; cursor: grab; }
+      .sortable li { cursor: grab; padding: 4px; background: #efe; margin: 2px 0; }
+      .toast { position: fixed; right: 12px; bottom: 12px; background: #222; color: #fff; padding: 8px 12px; }
+      .err { color: #b00; }
+    </style>
+  </head>
+  <body>
+    <h1>Fixture App</h1>
+
+    <section id="rows">
+      <table>
+        <tbody>
+          <tr><td>Mechanical keyboard</td><td>$89</td><td><button class="add">Add to cart</button></td></tr>
+          <tr><td>4K monitor</td><td>$329</td><td><button class="add">Add to cart</button></td></tr>
+          <tr><td>USB-C hub</td><td>$39</td><td><button class="add">Add to cart</button></td></tr>
+        </tbody>
+      </table>
+      <span id="cart">0</span>
+    </section>
+
+    <section id="shadowSec"><x-editor id="editor"></x-editor><span id="saved"></span></section>
+
+    <section id="menus">
+      <div class="menu" id="cssMenu"><button>Account</button><ul><li><a href="#profile" id="profileLink">Profile</a></li></ul></div>
+      <div class="jsmenu" id="jsMenu"><button aria-haspopup="true">Products</button><ul role="menu"><li role="menuitem" id="laptops">Laptops</li></ul></div>
+      <span id="menuResult"></span>
+    </section>
+
+    <section id="dnd">
+      <div class="lane" id="todo" data-testid="lane-todo"><div class="card" draggable="true" id="cardA" data-testid="card-a">Card A</div></div>
+      <div class="lane" id="done" data-testid="lane-done"></div>
+      <ul class="sortable" id="sortable"><li id="s1">One</li><li id="s2">Two</li><li id="s3">Three</li></ul>
+    </section>
+
+    <section id="forms">
+      <form id="signup" aria-label="Create account" novalidate>
+        <label for="email">Email</label> <input id="email" type="email" autocomplete="email" maxlength="40" aria-describedby="emailErr" />
+        <span id="emailErr" class="err"></span>
+        <label for="first">First name</label> <input id="first" autocomplete="given-name" />
+        <button type="submit">Create account</button>
+      </form>
+      <button id="saveBtn">Save settings</button>
+      <dialog id="dlg" aria-labelledby="dlgTitle"><h2 id="dlgTitle">Confirm delete</h2><button id="dlgClose">Close</button></dialog>
+      <button id="delBtn">Delete</button>
+    </section>
+
+    <iframe id="pay" name="payment" src="frame.html" width="320" height="90"></iframe>
+
+    <script>
+      document.querySelectorAll('.add').forEach((b) => b.addEventListener('click', () => (cart.textContent = String(Number(cart.textContent) + 1) + ':' + b.closest('tr').cells[0].textContent)));
+      customElements.define('x-editor', class extends HTMLElement {
+        constructor() {
+          super();
+          const r = this.attachShadow({ mode: 'open' });
+          r.innerHTML = '<input class="title" aria-label="Title"><button class="save">Save</button>';
+          r.querySelector('.save').addEventListener('click', () => (document.getElementById('saved').textContent = 'saved:' + r.querySelector('.title').value));
+        }
+      });
+      profileLink.addEventListener('click', (e) => { e.preventDefault(); menuResult.textContent = 'profile'; });
+      jsMenu.addEventListener('mouseenter', () => jsMenu.classList.add('open'));
+      jsMenu.addEventListener('mouseleave', () => jsMenu.classList.remove('open'));
+      laptops.addEventListener('click', () => (menuResult.textContent = 'laptops'));
+      cardA.addEventListener('dragstart', (e) => e.dataTransfer.setData('text/plain', 'cardA'));
+      for (const lane of [todo, done]) {
+        lane.addEventListener('dragover', (e) => e.preventDefault());
+        lane.addEventListener('drop', (e) => { e.preventDefault(); lane.appendChild(document.getElementById(e.dataTransfer.getData('text/plain'))); });
+      }
+      // mouse-driven sortable (like SortableJS / dnd-kit pointer sensors)
+      let dragging = null;
+      sortable.addEventListener('mousedown', (e) => { dragging = e.target.closest('li'); });
+      document.addEventListener('mouseup', (e) => {
+        if (!dragging) return;
+        const over = document.elementFromPoint(e.clientX, e.clientY)?.closest('#sortable li');
+        if (over && over !== dragging) sortable.insertBefore(dragging, over.nextSibling);
+        dragging = null;
+      });
+      signup.addEventListener('submit', (e) => {
+        e.preventDefault();
+        if (!/@/.test(email.value)) { email.setAttribute('aria-invalid', 'true'); emailErr.textContent = 'Enter a valid email'; return; }
+        email.removeAttribute('aria-invalid'); emailErr.textContent = '';
+        document.title = 'Welcome – Fixture';
+      });
+      saveBtn.addEventListener('click', () => {
+        setTimeout(() => { const t = document.createElement('div'); t.className = 'toast'; t.setAttribute('role', 'status'); t.textContent = 'Settings saved'; document.body.appendChild(t); setTimeout(() => t.remove(), 4000); }, 300);
+      });
+      delBtn.addEventListener('click', () => dlg.showModal());
+      dlgClose.addEventListener('click', () => dlg.close());
+    </script>
+  </body>
+</html>

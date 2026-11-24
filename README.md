@@ -7,6 +7,30 @@ Postman and HAR**.
 
 Works on any website or web app — no SDK, no app changes. Manifest V3, plain JavaScript, no build step.
 
+## What's new in 1.1
+
+- **Smart test data.** Every typed or chosen value is recognised: email, phone, name, address, date, amount, password, one-time code and more. Recognition uses labels, input types, `autocomplete` hints and constraints such as max length, pattern and min/max. The recorder also works out what the scenario is (sign-up, create, login, checkout, booking, search) and builds a **data plan**, for example: *sign-up form, so the email must be unique and needs a fresh value*.
+  - Before each replay the tester is asked to choose: **same data**, **new data**, or **custom** values per field (one-time codes are always asked for).
+  - Fresh values are realistic and keep the recorded format. Emails use plus-addressing (`you+x7k2@company.com`, so mail still reaches you), phone numbers keep their country code, codes keep their shape, and booking dates move into the future.
+  - Assertions that mention a value are updated to match the new data.
+- **Expected results captured automatically.** Toasts, alerts, validation messages, dialogs and page-title changes that appear after a step are stored with it.
+  - Replays check that they appear again: a missing result is a warning, or a failure if you mark it *required*.
+  - Exported specs assert them.
+- **Smarter locators.**
+  - **Scoped:** repeated elements are pinned to their container, e.g. *"Add to cart" in the row containing "4K monitor"*. Playwright: `getByRole('row').filter({ hasText })`; Cypress: `cy.contains('tr', …)`.
+  - **Shadow DOM:** open shadow roots (web components, Salesforce LWC) are searched.
+  - **Fewer noise steps:** clicks on blank layout areas are ignored.
+- **iframes.** Steps are recorded and replayed inside frames such as payment widgets and embedded apps. Playwright exports use `frameLocator`; Cypress exports get a `qaIframe()` helper.
+- **Hover menus and drag-and-drop.** A hover step is inserted when a click lands in a hover-revealed menu. Both HTML5 drag-and-drop and mouse-driven drag libraries (sortable lists, kanban boards) are recorded and replayed.
+- **Workbench dashboard.**
+  - Steps appear as a timeline with run-status pips.
+  - An inspector shows the screenshot with the element highlighted (switchable between the recording and the last replay), ranked locators with copy buttons, expected results, API calls and step details.
+  - Also: a network waterfall, a Test data view, run reports with an API diff, and dark and light themes.
+- **Built the "Skills for Real Engineers" way** ([mattpocock/skills](https://github.com/mattpocock/skills)):
+  - Shared domain language in [GLOSSARY.md](GLOSSARY.md), and decisions recorded in [docs/adr](docs/adr).
+  - Logic lives in deep modules tested at their interfaces: Test data, Step builder, Run report, Exporters.
+  - The DOM-bound modules have a browser feedback loop (`tests/browser`).
+
 ---
 
 ## Install (1 minute)
@@ -121,34 +145,45 @@ page-hook.js               recorder.js  ── steps ─────────
 ## Development
 
 ```powershell
-npm test          # unit tests: exporters, API diff, ZIP writer (Node 18+)
+npm test          # Node tests: test data, step builder, run report, exporters, API diff, ZIP (Node 18+)
 npm run check     # every file parses + every manifest/HTML/import reference resolves
 npm run package   # dist/qa-scenario-recorder-<version>.zip for the Chrome Web Store
 ```
 
+**Browser tests** cover the locator engine, the expected-result observer and replay (scoped, shadow DOM, iframe, hover, drag). Serve the repo folder over HTTP (any static server), open `/tests/browser/harness.html`, and run this in the DevTools console:
+
+```js
+await import('/tests/browser/dom-tests.js').then((m) => m.run())
+```
+
 ```
 manifest.json
-src/background/service-worker.js   state, storage, screenshots, navigation, replay driver
-src/content/page-hook.js            MAIN-world fetch/XHR/console capture
-src/content/selectors.js            element description + locator ranking/resolution
-src/content/recorder.js             interaction → step translation, assert mode, messaging
-src/content/replayer.js             step execution with auto-wait
+GLOSSARY.md, docs/adr/               domain language and recorded decisions
+src/background/service-worker.js   state, storage, screenshots, navigation, frame routing, replay driver
+src/content/page-hook.js            MAIN-world fetch/XHR/console capture (all frames)
+src/content/selectors.js            Locator engine: describe, rank, scope, shadow DOM, frame identity
+src/content/outcomes.js             Outcome observer: toasts/alerts/validation/dialogs/title; replay verification
+src/content/step-builder.js         Step builder: interactions -> steps (pure, Node-tested)
+src/content/recorder.js             DOM adapter: browser events -> interactions, hover menus, drag, assert mode
+src/content/replayer.js             step execution with auto-wait, drag, hover
 src/content/overlay.js              in-page toolbar / highlighter (shadow DOM)
+src/shared/test-data.js             Test data: field kinds, data plan, fresh values, spec generators
+src/shared/run-report.js            Run report: verdict, counts, issues, API diff
 src/shared/exporters.js             scenario model + all export formats (pure, tested)
 src/shared/analysis.js              URL normalisation, API diff, header masking
 src/shared/zip.js                   dependency-free ZIP writer
-src/popup/, src/dashboard/          UI
+src/popup/, src/dashboard/          popup controls and the Workbench
 demo/                               sample app to practise on
-tests/                              node:test suites
+tests/*.test.mjs                    Node suites at each module's interface
+tests/browser/                      browser feedback loop for the DOM-bound modules
 ```
 
 ## Known limitations (and next steps)
 
-- Records the **top frame of one tab**. Steps inside iframes and popup windows are not captured yet.
-- Replay dispatches DOM events from the extension. A few apps reject untrusted events; a
-  *"trusted input"* mode via the `chrome.debugger` API (CDP `Input.dispatch*`) is the natural next step.
-  The same API would also capture service-worker and WebSocket traffic.
-- File uploads are recorded (file names) but can't be replayed by an extension. The generated
-  specs include a `setInputFiles` / `selectFile` TODO.
-- Hover-only menus and drag-and-drop aren't recorded yet.
-- Response bodies are kept for text/JSON responses up to the size limit set in Settings (default 100 KB each).
+- Records **one tab**. Links that open a new tab or popup window, such as OAuth sign-in windows, are not followed yet.
+- Replay dispatches DOM events (see [ADR 0002](docs/adr/0002-replay-with-dom-events-not-cdp.md)).
+  - Apps that reject untrusted events, and **CSS-only** hover menus, may behave differently on replay. CSS-only menu items are still clicked, because they're allowed to be hidden after a hover step.
+  - A trusted-input replay adapter using the `chrome.debugger` API is the natural next step.
+- **Cross-origin iframes** are recorded and replayed. Cypress exports need `chromeWebSecurity: false` for them.
+- File uploads are recorded (file names) but can't be replayed by an extension. The specs include `setInputFiles` / `selectFile` TODOs.
+- Response bodies are kept for text/JSON responses up to the size limit set in Settings (100 KB each by default).

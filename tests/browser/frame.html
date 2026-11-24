@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="en">
+  <head><meta charset="utf-8" /><title>Payment widget</title></head>
+  <body style="font: 13px system-ui; margin: 6px">
+    <label for="cc">Card number</label> <input id="cc" autocomplete="cc-number" />
+    <button id="pay">Pay</button> <span id="paid"></span>
+    <script>pay.addEventListener('click', () => (paid.textContent = 'paid:' + cc.value));</script>
+  </body>
+</html>
