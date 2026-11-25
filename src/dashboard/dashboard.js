@@ -2,12 +2,13 @@
 import * as db from '../shared/db.js';
 import { getSettings, saveSettings, DEFAULT_SETTINGS } from '../shared/settings.js';
 import { buildScenario, parseBackup, candidateLabel } from '../shared/exporters.js';
-import { buildDataPlan, resolveData, createRng } from '../shared/test-data.js';
+import { buildDataPlan, resolveData, applyData, createRng } from '../shared/test-data.js';
 import { buildRunReport } from '../shared/run-report.js';
 import { exportSession, download, FORMATS } from '../shared/export-service.js';
 import { createProject, addSuite, addToSuite, removeFromSuite, moveInSuite, deleteSuite, suitesOf, buildProjectFiles, toProjectBackup, parseProjectBackup } from '../shared/projects.js';
 import { createZip } from '../shared/zip.js';
 import { slugify } from '../shared/exporters.js';
+import { formatBody, highlight } from '../shared/body-format.js';
 
 const $ = (id) => document.getElementById(id);
 
@@ -73,6 +74,28 @@ const pretty = (b) => {
     return String(b);
   }
 };
+let bodyRaw = false; // Network detail: show bodies raw instead of formatted
+
+/** A request/response body, pretty-printed in its own format (JSON, XML, SOAP, HTML, form, GraphQL). */
+function bodyBlock(title, body, contentType) {
+  const f = formatBody(body, contentType);
+  const pre = h('pre', { class: `code body-${f.format}` });
+  if (bodyRaw) pre.textContent = String(body);
+  else pre.append(...highlight(f.text, f.format).map(([cls, t]) => (cls ? h('span', { class: cls, text: t }) : document.createTextNode(t))));
+  return [
+    h(
+      'div',
+      { class: 'body-head' },
+      h('h4', { text: title }),
+      h('span', { class: `fmt-badge${f.ok ? '' : ' bad'}`, title: contentType ? `Content-Type: ${typeof contentType === 'string' ? contentType : ''}` : 'Detected from the body', text: f.label }),
+      h('span', { class: 'grow' }),
+      h('button', { class: 'btn ghost sm', 'aria-pressed': String(bodyRaw), text: bodyRaw ? 'Pretty' : 'Raw', onclick: () => ((bodyRaw = !bodyRaw), renderView()) }),
+      h('button', { class: 'btn ghost sm', text: 'Copy', onclick: () => copy(bodyRaw ? String(body) : f.text, `${title} copied`) }),
+    ),
+    pre,
+  ];
+}
+
 function toast(text) {
   const t = h('div', { class: 'toast', text });
   $('toasts').append(t);
@@ -570,12 +593,10 @@ function netDetail(e) {
       kvList({ Type: e.api, Duration: fmtMs(e.duration), Started: fmtDate(e.startTime || e.ts), Frame: e.frameUrl, Error: e.error, Truncated: e.bodyTruncated ? 'response truncated' : '' }),
       h('h4', { text: 'Request headers' }),
       kvList(e.requestHeaders),
-      e.requestBody ? h('h4', { text: 'Request body' }) : null,
-      e.requestBody ? h('pre', { text: pretty(e.requestBody) }) : null,
+      e.requestBody ? bodyBlock('Request body', e.requestBody, e.requestHeaders) : null,
       h('h4', { text: 'Response headers' }),
       kvList(e.responseHeaders),
-      h('h4', { text: 'Response body' }),
-      e.responseBody ? h('pre', { text: pretty(e.responseBody) }) : h('div', { class: 'dim', text: e.api === 'document' ? 'Document bodies are not captured' : '—' }),
+      e.responseBody ? bodyBlock('Response body', e.responseBody, e.mimeType || e.responseHeaders) : [h('h4', { text: 'Response body' }), h('div', { class: 'dim', text: e.api === 'document' ? 'Document bodies are not captured' : '—' })],
     ),
   );
 }
@@ -676,17 +697,84 @@ async function saveChoice(choice) {
 // ================================================================== replay dialog
 
 let dialogChoice = null;
+const NOT_EXECUTED = new Set(['note']);
+
+/** Steps that will execute in this run (recorded order), with this run's data applied. */
+function runSteps() {
+  const raw = cur.events.filter((e) => e.kind === 'step' && !e.runId && !e.skip && !NOT_EXECUTED.has(e.action)).sort((a, b) => a.seq - b.seq);
+  const resolved = resolveData(cur.plan, { mode: 'recommended', ...dialogChoice }, { rng: createRng(dialogChoice.seed) });
+  const applied = new Map(applyData(raw, resolved).map((s) => [s.id, s]));
+  return { raw, applied, resolved };
+}
+
 function updateRunGate() {
   if (!dialogChoice) return;
-  const r = resolveData(cur.plan, { mode: 'recommended', ...dialogChoice }, { rng: createRng(dialogChoice.seed) });
-  const missing = r.fields.filter((f) => f.missing);
-  $('btnRunWithData').disabled = missing.length > 0;
-  $('dataDialogHint').textContent = missing.length ? `Enter a value for: ${missing.map((f) => f.label).join(', ')}` : `Seed ${dialogChoice.seed} · values are kept in the Run report`;
+  const { raw, resolved } = runSteps();
+  const missing = resolved.fields.filter((f) => f.missing && !dialogChoice.excluded.has(f.stepId));
+  const included = raw.filter((s) => !dialogChoice.excluded.has(s.id)).length;
+  const problems = [];
+  if (missing.length) problems.push(`enter a value for ${missing.map((f) => f.label).join(', ')}`);
+  if (!included) problems.push('include at least one step');
+  if (!dialogChoice.reviewed) problems.push('confirm you reviewed the steps');
+  $('btnRunWithData').disabled = problems.length > 0;
+  $('dataDialogHint').textContent = problems.length ? `To run: ${problems.join(' · ')}` : `${included} of ${raw.length} steps · seed ${dialogChoice.seed}`;
 }
+
+/** The scenario exactly as it will run: one row per step, values for this run, tick to include. */
+function stepReview(redraw) {
+  const { raw, applied } = runSteps();
+  const desc = new Map(cur.scenario.steps.map((s) => [s.id, s]));
+  const fieldOf = new Map(cur.plan.fields.map((f) => [f.stepId, f]));
+  const valueOf = (s) => {
+    const a = applied.get(s.id);
+    if (s.action === 'fill' || s.action === 'select') {
+      const f = fieldOf.get(s.id);
+      if (f?.secret || s.sensitive) return '•••••••• (secret)';
+      return a.action === 'select' ? (a.optionLabels?.[0] || a.value) : a.value;
+    }
+    if (s.action === 'assert') return a.assert?.expected !== undefined ? `${a.assert.type} = "${a.assert.expected}"` : a.assert?.type;
+    if (s.action === 'goto') return s.url;
+    if (s.action === 'press') return s.key;
+    return null;
+  };
+  const allOn = raw.every((s) => !dialogChoice.excluded.has(s.id));
+  const rows = raw.map((s) => {
+    const d = desc.get(s.id);
+    const on = !dialogChoice.excluded.has(s.id);
+    const v = valueOf(s);
+    const changed = (s.action === 'fill' || s.action === 'select') && applied.get(s.id).value !== s.value && !s.sensitive;
+    return h(
+      'label',
+      { class: `review-row${on ? '' : ' off'}` },
+      h('input', { type: 'checkbox', checked: on, onchange: (e) => (e.target.checked ? dialogChoice.excluded.delete(s.id) : dialogChoice.excluded.add(s.id), redraw()) }),
+      h('span', { class: `node a-${s.action}`, text: d?.n ?? '' }),
+      h('span', { class: 'review-main' }, h('span', { class: 'review-desc', text: d?.description || s.action }), v != null ? h('span', { class: `review-val${changed ? ' changed' : ''}`, text: changed ? `${v}  (new value)` : String(v) }) : null),
+      d?.outcomes?.length ? h('span', { class: 'tag out', title: d.outcomes.map((o) => o.text).join(' · '), text: `expects ${d.outcomes.length}` }) : h('span'),
+    );
+  });
+  const skippedAlways = cur.events.filter((e) => e.kind === 'step' && !e.runId && e.skip).length;
+  return h(
+    'section',
+    { class: 'panel review' },
+    h(
+      'header',
+      { class: 'panel-head' },
+      h('h3', { text: 'Steps to run' }),
+      h('span', { class: 'dim mono', text: `${raw.length - dialogChoice.excluded.size} / ${raw.length}` }),
+      h('span', { class: 'grow' }),
+      h('button', { type: 'button', class: 'btn ghost sm', text: allOn ? 'Untick all' : 'Tick all', onclick: () => ((dialogChoice.excluded = allOn ? new Set(raw.map((s) => s.id)) : new Set()), redraw()) }),
+    ),
+    h('div', { class: 'review-list' }, rows),
+    skippedAlways ? h('div', { class: 'panel-body dim', text: `${skippedAlways} step(s) marked "Skip in replay" are not listed — change that in the Steps view.` }) : null,
+  );
+}
+
 function openReplayDialog(choice = savedChoice()) {
-  dialogChoice = { strategies: { ...choice.strategies }, custom: { ...choice.custom }, seed: choice.seed };
+  dialogChoice = { strategies: { ...choice.strategies }, custom: { ...choice.custom }, seed: choice.seed, excluded: new Set(), reviewed: false };
+  $('dataDialogTitle').textContent = `Review and run: ${cur.session.name}`;
   const content = $('dataDialogContent');
   const draw = () => {
+    const scroll = content.scrollTop;
     content.replaceChildren(
       intentBanner(),
       cur.plan.fields.length
@@ -704,17 +792,26 @@ function openReplayDialog(choice = savedChoice()) {
             h('div', { class: 'panel' }, dataTable(dialogChoice, draw)),
           )
         : '',
+      stepReview(draw),
+      h(
+        'label',
+        { class: 'confirm-row' },
+        h('input', { type: 'checkbox', id: 'reviewConfirm', checked: dialogChoice.reviewed, onchange: (e) => ((dialogChoice.reviewed = e.target.checked), updateRunGate()) }),
+        h('span', {}, h('strong', { text: 'I have reviewed these steps and the data above' }), h('span', { class: 'dim', text: ' — the run will execute the ticked steps in this order.' })),
+      ),
     );
+    content.scrollTop = scroll;
     updateRunGate();
   };
   draw();
   $('dataDialog').showModal();
 }
 $('dataDialog').addEventListener('close', async () => {
-  if ($('dataDialog').returnValue !== 'run' || !dialogChoice) return;
-  const data = { mode: 'recommended', ...dialogChoice };
+  if ($('dataDialog').returnValue !== 'run' || !dialogChoice?.reviewed) return;
+  const { excluded, reviewed, ...choice } = dialogChoice;
+  const data = { mode: 'recommended', ...choice };
   const tab = await chrome.tabs.create({ url: 'about:blank', active: true });
-  const res = await chrome.runtime.sendMessage({ type: 'replay', sessionId: cur.session.id, tabId: tab.id, data });
+  const res = await chrome.runtime.sendMessage({ type: 'replay', sessionId: cur.session.id, tabId: tab.id, data, excludeStepIds: [...excluded] });
   if (res?.error) {
     alert(res.error);
     chrome.tabs.remove(tab.id);

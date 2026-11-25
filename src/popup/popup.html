@@ -19,6 +19,17 @@
       <input id="sessionName" type="text" placeholder="Scenario name (optional) — e.g. Login → create order" />
     </section>
 
+    <section id="targetRow" class="card target" aria-label="Project and suite">
+      <div class="save-head"><b>File scenarios into</b><span id="targetInfo" class="muted"></span></div>
+      <select id="targetSel" aria-label="Project and suite for new scenarios"></select>
+      <div id="newTarget" class="new-target hidden">
+        <input id="newProject" type="text" list="projectNames" placeholder="Project (new or existing)" aria-label="Project name" />
+        <datalist id="projectNames"></datalist>
+        <input id="newSuite" type="text" placeholder="Suite, e.g. Smoke" aria-label="Suite name" />
+        <div class="save-row"><button id="btnCreateTarget" class="primary">Create</button><button id="btnCancelTarget">Cancel</button></div>
+      </div>
+    </section>
+
     <section class="stats">
       <div><b id="sTime">00:00</b><span>time</span></div>
       <div><b id="sSteps">0</b><span>steps</span></div>
@@ -32,9 +43,17 @@
       <button id="btnPause" title="Pause / resume (Alt+Shift+P)">Pause</button>
       <button id="btnStop" title="Stop recording">Stop</button>
       <button id="btnRerun" title="Replay the scenario in this tab">Rerun</button>
-      <button id="btnReset" class="danger" title="Discard the current capture">Reset</button>
+      <button id="btnReset" class="danger" title="Discard this recording (cannot be undone)">Reset</button>
     </section>
     <div id="dataHint" class="data-hint hidden"></div>
+
+    <section id="nextCard" class="card hidden" aria-label="Next scenario">
+      <div class="save-head"><b>Next scenario</b><span class="muted">saves this one, starts a fresh recording</span></div>
+      <div class="save-row">
+        <input id="nextName" type="text" placeholder="Next scenario name (optional)" aria-label="Next scenario name" />
+        <button id="btnNext" class="primary" title="Save the current scenario, reset the workspace and record the next one in this tab">Save &amp; next ▶</button>
+      </div>
+    </section>
 
     <section id="saveCard" class="card hidden" aria-label="Save scenario">
       <div class="save-head"><b>Save scenario</b><span id="savedIn" class="muted"></span></div>

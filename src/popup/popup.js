@@ -83,7 +83,87 @@ function render(s) {
   renderLastRun();
   renderDataHint().catch(() => {});
   renderSaveCard().catch(() => {});
+  renderTarget().catch(() => {});
+  $('nextCard').classList.toggle('hidden', !s.sessionId || st === STATUS.REPLAYING);
+  $('targetRow').classList.toggle('hidden', st === STATUS.REPLAYING);
 }
+
+// ------------------------------------------------------------------ target project / suite
+
+const targetKey = (t) => (t ? `${t.projectId}|${t.suiteId}` : '');
+async function renderTarget() {
+  const db = await import('../shared/db.js');
+  const projects = await db.listProjects();
+  const sel = $('targetSel');
+  const want = targetKey(state?.target);
+  sel.replaceChildren(new Option('No suite — keep in Unsorted', ''));
+  for (const p of projects) {
+    const group = document.createElement('optgroup');
+    group.label = p.name;
+    for (const s of p.suites) group.append(new Option(`${s.name} (${s.scenarioIds.length})`, `${p.id}|${s.id}`));
+    sel.append(group);
+  }
+  sel.append(new Option('+ New project / suite…', 'new'));
+  sel.value = [...sel.options].some((o) => o.value === want) ? want : '';
+  $('projectNames').replaceChildren(...projects.map((p) => new Option(p.name)));
+  const active = state?.status === STATUS.RECORDING || state?.status === STATUS.PAUSED;
+  $('targetInfo').textContent = want ? (active ? 'this recording is filed here' : 'new recordings go here') : '';
+}
+
+$('targetSel').addEventListener('change', async () => {
+  const v = $('targetSel').value;
+  if (v === 'new') {
+    $('newTarget').classList.remove('hidden');
+    $('newProject').focus();
+    return;
+  }
+  $('newTarget').classList.add('hidden');
+  const [projectId, suiteId] = v ? v.split('|') : [];
+  await act('setTarget', { target: v ? { projectId, suiteId } : null });
+});
+$('btnCancelTarget').addEventListener('click', () => {
+  $('newTarget').classList.add('hidden');
+  renderTarget();
+});
+$('btnCreateTarget').addEventListener('click', async () => {
+  try {
+    const db = await import('../shared/db.js');
+    const { createProject, addSuite } = await import('../shared/projects.js');
+    const pName = $('newProject').value.trim();
+    const sName = $('newSuite').value.trim() || 'Smoke';
+    if (!pName) throw new Error('Enter a project name');
+    const projects = await db.listProjects();
+    let project = projects.find((p) => p.name.toLowerCase() === pName.toLowerCase());
+    if (!project) {
+      let baseUrl = '';
+      try {
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (/^https?:/.test(tab?.url || '')) baseUrl = new URL(tab.url).origin;
+      } catch {}
+      project = createProject({ name: pName, baseUrl });
+    }
+    let suite = project.suites.find((s) => s.name.toLowerCase() === sName.toLowerCase());
+    if (!suite) ({ project, suite } = addSuite(project, sName));
+    await db.putProject(project);
+    $('newTarget').classList.add('hidden');
+    $('newProject').value = $('newSuite').value = '';
+    await act('setTarget', { target: { projectId: project.id, suiteId: suite.id } });
+    flash(`New scenarios will be filed in ${project.name} › ${suite.name}`);
+  } catch (e) {
+    flash(e.message, true);
+  }
+});
+
+$('btnNext').addEventListener('click', async () => {
+  const res = await act('nextScenario', { name: $('nextName').value });
+  if (!res) return;
+  $('nextName').value = '';
+  saveCardFor = null;
+  const p = res.previous;
+  if (p?.empty) flash('Previous recording had no steps and was dropped. Recording the next scenario.');
+  else if (p) flash(`Saved "${p.name}"${p.filedIn ? ` to ${p.filedIn}` : ' (Unsorted)'}. Recording the next scenario.`);
+  else flash('Recording a new scenario.');
+});
 
 // ------------------------------------------------------------------ save scenario to a suite
 
@@ -182,7 +262,7 @@ async function renderLastRun() {
 
 // ------------------------------------------------------------------ wiring
 
-$('btnStart').addEventListener('click', () => act('start', { name: $('sessionName').value }));
+$('btnStart').addEventListener('click', () => act('start', { name: $('sessionName').value, target: state?.target ?? null }));
 $('btnPause').addEventListener('click', () => act(state?.status === STATUS.PAUSED ? 'resume' : 'pause'));
 $('btnStop').addEventListener('click', async () => {
   const res = await act('stop');
@@ -206,24 +286,20 @@ async function renderDataHint() {
   const el = $('dataHint');
   if (!state?.sessionId || state.status !== STATUS.STOPPED) return el.classList.add('hidden');
   const d = await rerunDecision(state.sessionId);
-  if (!d.plan.fields.length) return el.classList.add('hidden');
-  el.replaceChildren('Rerun ', Object.assign(document.createElement('b'), { textContent: d.ask ? 'asks which test data to use' : d.why }), d.ask ? ` (${d.why}).` : '.');
+  el.replaceChildren(
+    'Rerun ',
+    Object.assign(document.createElement('b'), { textContent: 'opens a step-by-step review' }),
+    d.plan.fields.length ? ` to confirm before it runs — test data: ${d.ask ? `you choose (${d.why})` : d.why}.` : ' to confirm before it runs.',
+  );
   el.classList.remove('hidden');
 }
 
-$('btnRerun').addEventListener('click', async () => {
-  const sid = state?.sessionId;
-  try {
-    const d = await rerunDecision(sid);
-    if (d.ask) return act('openDashboard', { sessionId: `${sid}/replay` });
-    act('replay', { sessionId: sid, data: d.data });
-  } catch (e) {
-    flash(e.message, true);
-  }
-});
+// Every rerun is confirmed step by step in the workbench before it executes.
+$('btnRerun').addEventListener('click', () => act('openDashboard', { sessionId: `${state?.sessionId}/replay` }));
 $('btnStopReplay').addEventListener('click', () => act('stopReplay'));
 $('btnReset').addEventListener('click', () => {
-  if (confirm('Discard the current capture (steps, API calls and screenshots)? This cannot be undone.')) act('reset');
+  const msg = 'Discard this recording? Its steps, API calls and screenshots are deleted and it is removed from any suite. This cannot be undone.\n\nTo keep it and record another, use "Save & next" instead.';
+  if (confirm(msg)) act('reset').then((r) => r && flash('Recording discarded.'));
 });
 $('btnAssert').addEventListener('click', async () => {
   await act('assertMode');

@@ -7,6 +7,7 @@ import { STATUS, getSettings, splitLines } from '../shared/settings.js';
 import { matchesAnyPattern, normalizeUrl, sameRoute } from '../shared/analysis.js';
 import { buildDataPlan, resolveData, applyData, createRng } from '../shared/test-data.js';
 import { buildRunReport } from '../shared/run-report.js';
+import { addToSuite, removeFromSuite, suitesOf } from '../shared/projects.js';
 
 // Must match manifest.json content_scripts order.
 const CONTENT_FILES = [
@@ -31,6 +32,7 @@ const EMPTY_STATE = {
   assertMode: false,
   counts: { steps: 0, network: 0, console: 0, errors: 0, screenshots: 0 },
   replay: null, // { sessionId, runId, tabId, index, total }
+  target: null, // { projectId, suiteId } — where new scenarios are filed; survives reset / next
 };
 
 let state = null;
@@ -324,7 +326,7 @@ async function captureNow({ tabId, stepEventId = null, reason = 'step', runId = 
 
 // ------------------------------------------------------------------ recording controls
 
-async function startRecording({ tabId, name }) {
+async function startRecording({ tabId, name, target }) {
   await loadState();
   if (isActive() || state.status === STATUS.REPLAYING) throw new Error('A recording or replay is already in progress.');
   const tab = await chrome.tabs.get(tabId);
@@ -345,7 +347,9 @@ async function startRecording({ tabId, name }) {
     runs: [],
   };
   await db.putSession(session);
-  state = { ...structuredClone(EMPTY_STATE), status: STATUS.RECORDING, sessionId: session.id, tabId, startedAt: Date.now() };
+  const keepTarget = target === undefined ? state.target : target;
+  state = { ...structuredClone(EMPTY_STATE), status: STATUS.RECORDING, sessionId: session.id, tabId, startedAt: Date.now(), target: keepTarget };
+  await fileInTarget(session.id); // filed up-front so a crash mid-recording still leaves it in the suite
   cidToEventId.clear();
   const first = await addStep({ action: 'goto', url: tab.url, title: tab.title, ts: Date.now() });
   await saveState();
@@ -397,16 +401,77 @@ async function stopRecording() {
   return publicState();
 }
 
+/** File a scenario into the current target suite (no-op without a valid target). Returns "Project › Suite" or null. */
+async function fileInTarget(sessionId) {
+  const t = state.target;
+  if (!t || !sessionId) return null;
+  const project = await db.getProject(t.projectId);
+  const suite = project?.suites.find((x) => x.id === t.suiteId);
+  if (!suite) {
+    state.target = null; // project or suite was deleted from the dashboard
+    return null;
+  }
+  await db.putProject(addToSuite(project, suite.id, sessionId));
+  return `${project.name} › ${suite.name}`;
+}
+
+async function setTarget({ target }) {
+  await loadState();
+  state.target = target?.projectId && target?.suiteId ? { projectId: target.projectId, suiteId: target.suiteId } : null;
+  if (isActive()) await fileInTarget(state.sessionId);
+  await saveState();
+  return publicState();
+}
+
+/** Reset = discard the current recording: its steps, API calls, screenshots and suite membership. */
 async function resetCapture() {
   await loadState();
   if (state.status === STATUS.REPLAYING) throw new Error('Stop the replay first.');
-  const { sessionId, tabId } = state;
-  if (sessionId) await db.deleteSession(sessionId);
-  state = structuredClone(EMPTY_STATE);
+  const { sessionId, tabId, target } = state;
+  if (sessionId) {
+    for (const { project, suite } of suitesOf(await db.listProjects(), sessionId)) {
+      await db.putProject(removeFromSuite(project, suite.id, sessionId));
+    }
+    await db.deleteSession(sessionId);
+  }
+  state = { ...structuredClone(EMPTY_STATE), target };
   cidToEventId.clear();
   await saveState();
   if (tabId) broadcastConfig(tabId, contentConfigFor(-1));
   return publicState();
+}
+
+/**
+ * Next scenario = finish and keep the current one (stop + file in the target
+ * suite), clear the workspace, then start recording a new scenario in the
+ * same tab. The previous scenario is never deleted.
+ */
+async function nextScenario({ name, tabId }) {
+  await loadState();
+  if (state.status === STATUS.REPLAYING) throw new Error('Stop the replay first.');
+  const prevId = state.sessionId;
+  let saved = null;
+  if (prevId) {
+    if (isActive()) await stopRecording();
+    const session = await db.getSession(prevId);
+    if (session && !(session.summary?.steps > 1)) {
+      // nothing but the initial "goto" — not worth keeping
+      saved = { id: prevId, name: session.name, empty: true };
+    } else if (session) {
+      saved = { id: prevId, name: session.name, filedIn: await fileInTarget(prevId) };
+    }
+  }
+  const tab = tabId ?? (state.tabId && (await chrome.tabs.get(state.tabId).catch(() => null)) ? state.tabId : await activeTabId());
+  const target = state.target;
+  state = { ...structuredClone(EMPTY_STATE), target };
+  cidToEventId.clear();
+  await saveState();
+  if (saved?.empty) {
+    await db.deleteSession(prevId);
+    for (const { project, suite } of suitesOf(await db.listProjects(), prevId)) await db.putProject(removeFromSuite(project, suite.id, prevId));
+  }
+  const res = await startRecording({ tabId: tab, name });
+  return { ...res, previous: saved };
 }
 
 async function setAssertMode(on) {
@@ -661,7 +726,8 @@ async function verifyOutcomes(tabId, step, frameId) {
  * Replay a Scenario in a tab.
  * data = { mode: 'recommended'|'recorded'|'fresh', strategies, custom, seed } — the tester's Test data choice.
  */
-async function startReplay({ sessionId, tabId, data }) {
+async function startReplay({ sessionId, tabId, data, excludeStepIds = [] }) {
+  const excluded = new Set(excludeStepIds); // steps the tester unticked in the review dialog (this run only)
   await loadState();
   if (isActive()) await stopRecording();
   if (state.status === STATUS.REPLAYING) throw new Error('A replay is already running.');
@@ -678,7 +744,7 @@ async function startReplay({ sessionId, tabId, data }) {
   const resolved = resolveData(plan, data || { mode: 'recorded' }, { rng: createRng(data?.seed) });
   const missing = new Set(resolved.fields.filter((f) => f.missing).map((f) => f.stepId));
   const steps = applyData(allSteps, resolved)
-    .filter((st) => !SKIP_ON_REPLAY.has(st.action) && !st.skip)
+    .filter((st) => !SKIP_ON_REPLAY.has(st.action) && !st.skip && !excluded.has(st.id))
     .map((st) => (missing.has(st.id) ? { ...st, dataMissing: true } : st));
   const expectedUrls = expectedUrlsAfterSteps(steps, navs);
 
@@ -689,6 +755,7 @@ async function startReplay({ sessionId, tabId, data }) {
     status: 'running',
     results: [],
     total: steps.length,
+    excludedByTester: excluded.size,
     data: {
       mode: data?.mode || 'recorded',
       fields: resolved.fields.map((f) => ({ key: f.key, label: f.label, kind: f.kind, strategy: f.strategy, value: f.secret ? '••••' : f.value })),
@@ -870,8 +937,10 @@ const handlers = {
     return publicState();
   },
   async start(msg) {
-    return startRecording({ tabId: msg.tabId ?? (await activeTabId()), name: msg.name });
+    return startRecording({ tabId: msg.tabId ?? (await activeTabId()), name: msg.name, target: msg.target });
   },
+  nextScenario: (msg) => nextScenario({ name: msg.name, tabId: msg.tabId }),
+  setTarget: (msg) => setTarget(msg),
   pause: pauseRecording,
   resume: resumeRecording,
   stop: stopRecording,
@@ -888,7 +957,7 @@ const handlers = {
     return publicState();
   },
   async replay(msg) {
-    return startReplay({ sessionId: msg.sessionId, tabId: msg.tabId ?? (await activeTabId()), data: msg.data });
+    return startReplay({ sessionId: msg.sessionId, tabId: msg.tabId ?? (await activeTabId()), data: msg.data, excludeStepIds: msg.excludeStepIds });
   },
   async stopReplay() {
     replayCancelled = true;

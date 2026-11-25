@@ -322,6 +322,22 @@ main { min-width: 0; overflow: auto; }
 .warnbox { margin-top: 8px; padding: 8px 10px; border-radius: 6px; background: var(--warn-soft); color: var(--warn); font-size: 12px; }
 .preview-pane pre.code { max-height: calc(100vh - 260px); min-height: 380px; }
 
+/* ------------------------------------------------------------ review before run */
+.review { margin-top: 14px; }
+.review-list { max-height: 46vh; overflow: auto; }
+.review-row { display: grid; grid-template-columns: 18px 28px minmax(0, 1fr) auto; gap: 10px; align-items: center; padding: 7px 14px; border-top: 1px solid var(--rule); cursor: pointer; }
+.review-row:first-child { border-top: 0; }
+.review-row:hover { background: var(--panel-2); }
+.review-row.off { opacity: 0.45; }
+.review-row.off .review-desc { text-decoration: line-through; }
+.review-row .node { width: 24px; height: 24px; font-size: 10px; }
+.review-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.review-desc { font-weight: 600; font-size: 12.5px; }
+.review-val { font: 11.5px var(--font-mono); color: var(--ink-2); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-val.changed { color: var(--amber); }
+.confirm-row { display: flex; gap: 10px; align-items: flex-start; margin: 14px 0 6px; padding: 12px 14px; border: 1px solid var(--amber); border-radius: var(--radius); background: var(--amber-soft); cursor: pointer; font-size: 13px; }
+.confirm-row input { margin-top: 3px; accent-color: var(--amber); }
+
 /* ------------------------------------------------------------ project tree */
 .new-project { margin: 0 12px 8px; justify-content: flex-start; }
 .tree { overflow: auto; flex: 1; padding: 0 8px 12px; }
@@ -397,3 +413,21 @@ dialog::backdrop { background: rgba(5, 7, 10, 0.62); backdrop-filter: blur(3px);
   .head, .view { padding-left: 16px; padding-right: 16px; }
 }
 @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+/* formatted API bodies */
+.body-head { display: flex; align-items: center; gap: 8px; margin-top: 14px; }
+.body-head h4 { margin: 0; }
+.fmt-badge { font: 600 10.5px/1 var(--font-mono); padding: 3px 6px; border-radius: 4px; border: 1px solid var(--rule); color: var(--ink-2, var(--ink)); background: var(--panel-2); text-transform: uppercase; letter-spacing: .04em; }
+.fmt-badge.bad { color: #b3261e; border-color: currentColor; }
+.body-head + pre { margin-top: 6px; white-space: pre; word-break: normal; }
+.tk-key { color: #8a3ffc; }
+.tk-str { color: #0b7a3e; }
+.tk-num { color: #b35c00; }
+.tk-lit { color: #0062d1; font-weight: 600; }
+.tk-tag { color: #0062d1; }
+.tk-punc { color: #6b7280; }
+.tk-comment { color: #6b7280; font-style: italic; }
+@media (prefers-color-scheme: dark) {
+  .tk-key { color: #c4a7ff; } .tk-str { color: #7ee2a8; } .tk-num { color: #ffb86b; }
+  .tk-lit, .tk-tag { color: #79b8ff; } .tk-punc, .tk-comment { color: #9ca3af; }
+}
